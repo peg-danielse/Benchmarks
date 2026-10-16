@@ -154,20 +154,20 @@ func TestIdleWorkersStayParked(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	rec := startLoad(ctx, func(context.Context, int) error { return nil }, 4096, 1)
 	deadline := time.Now().Add(time.Second)
-	for rec.done.Load() == 0 && time.Now().Before(deadline) {
+	for rec.snapshot().done == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if rec.done.Load() == 0 {
+	if rec.snapshot().done == 0 {
 		cancel()
 		rec.wg.Wait()
 		t.Fatal("the one active worker made no calls")
 	}
 	rec.setActive(32)
 	time.Sleep(30 * time.Millisecond)
-	if rec.done.Load() < 32 {
+	if rec.snapshot().done < 32 {
 		cancel()
 		rec.wg.Wait()
-		t.Fatalf("done %d after waking 32 workers", rec.done.Load())
+		t.Fatalf("done %d after waking 32 workers", rec.snapshot().done)
 	}
 	cancel()
 	finished := make(chan struct{})

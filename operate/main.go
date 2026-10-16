@@ -19,6 +19,12 @@
 // across 1, 2, 4, 8, 16, and 32 cores and prints arrival_rate, service_rate,
 // and the average and p95 service times.
 //
+// autoscale -client mercury (default) runs the load generator as Mercury daemon
+// hotel-loadgen (bin/loadgen, build with go build -o bin/loadgen ./operate) on
+// -gen-cpu with saturate -gen-min..-gen-max and copies its output here.
+// -client inproc keeps the generator in this process on CPUs 60-63.
+// -conns sets the gRPC connections each route shares (0 = one per worker).
+//
 // autoscale attaches Mercury's saturate policy at 16 cores to every program
 // in mercury-hotel.txt, then raises every route together from 1 caller to
 // -users and back down.
@@ -43,6 +49,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -55,12 +62,27 @@ import (
 const root = "/home/paul/Benchmarks"
 
 func main() {
+	if os.Getenv(envRole) == roleGen {
+		if err := runLoadgen(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	mercury := flag.String("mercury", "127.0.0.1:8080", "Mercury host:port")
 	cpu := flag.Int("cpu", 0, "daemon CPU number Mercury was given (not the CPU Mercury pinned itself to)")
 	users := flag.Int("users", 1024, "maximum concurrent users on each autoscale route")
 	coldCache := flag.Bool("cold-cache", true, "leave odd hotel ids uncached so requests still read MongoDB (HOTEL_COLD_CACHE)")
 	file := flag.String("file", root+"/mercury-hotel.txt", "deployment list")
 	configPath := flag.String("config", root+"/deathstar-hotelReservations/config.json", "hotel address file")
+	client := flag.String("client", clientMercury, "autoscale load generator: mercury (bin/loadgen as a Mercury daemon) or inproc (this process pinned to CPUs 60-63)")
+	conns := flag.Int("conns", 16, "gRPC connections each route shares among its workers; 0 = one per worker (old behaviour)")
+	genBin := flag.String("gen-bin", root+"/deathstar-hotelReservations/bin/loadgen", "loadgen binary for -client mercury")
+	genOut := flag.String("gen-out", "", "loadgen output file (default output/loadgen-<unix>.out)")
+	genCPU := flag.Int("gen-cpu", defaultGenCPU, "loadgen home Linux CPU")
+	genMin := flag.Int("gen-min", defaultGenMin, "loadgen saturate min cores")
+	genMax := flag.Int("gen-max", defaultGenMax, "loadgen saturate max cores")
+	genProcs := flag.Int("gen-procs", defaultGenProcs, "loadgen GOMAXPROCS (keep >= gen-max so busy threads can exceed cores)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: operate [flags] start|stop|test|scale|autoscale\n\n")
 		flag.PrintDefaults()
@@ -74,7 +96,20 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*mercury, *cpu, *users, *file, *configPath, cmd, *coldCache); err != nil {
+	if *client != clientMercury && *client != clientInproc {
+		fmt.Fprintf(os.Stderr, "-client must be %s or %s\n", clientMercury, clientInproc)
+		os.Exit(2)
+	}
+	if *conns < 0 || *genMin < 1 || *genMax < *genMin || *genProcs < 1 {
+		fmt.Fprintln(os.Stderr, "need -conns >= 0, 1 <= -gen-min <= -gen-max, -gen-procs >= 1")
+		os.Exit(2)
+	}
+	connsPerRoute = *conns
+	opts := clientOpts{
+		mode: *client, bin: *genBin, out: *genOut, config: *configPath, homeCPU: *genCPU,
+		genMin: *genMin, genMax: *genMax, genProcs: *genProcs, conns: *conns,
+	}
+	if err := run(*mercury, *cpu, *users, *file, *configPath, cmd, *coldCache, opts); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -86,7 +121,7 @@ type tuple struct {
 	id       string
 }
 
-func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache bool) error {
+func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache bool, opts clientOpts) error {
 	lines, err := parseFile(file)
 	if err != nil {
 		return err
@@ -114,8 +149,18 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 		return fmt.Errorf("unknown command %s", cmd)
 	}
 
-	var started []tuple
+	var (
+		startedMu sync.Mutex
+		started   []tuple
+	)
+	track := func(t tuple) {
+		startedMu.Lock()
+		started = append(started, t)
+		startedMu.Unlock()
+	}
 	stopStarted := func() {
+		startedMu.Lock()
+		defer startedMu.Unlock()
 		for i := len(started) - 1; i >= 0; i-- {
 			if err := kill(base, started[i].id); err != nil {
 				fmt.Fprintf(os.Stderr, "kill %s: %v\n", started[i].id, err)
@@ -147,7 +192,7 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 			return fmt.Errorf("%s: %w", line.id, err)
 		}
 		fmt.Printf("started %s daemon_id=%s pid %d %s\n", filepath.Base(line.path), line.id, pid, formatEnv(env))
-		started = append(started, line)
+		track(line)
 		if err := waitPort(addr, 60*time.Second); err != nil {
 			stopStarted()
 			return fmt.Errorf("%s did not listen on %s: %w", line.id, addr, err)
@@ -166,9 +211,9 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 	}
 	switch cmd {
 	case "scale":
-		err = scaleServices(base, cfg, started)
+		err = scaleServices(base, cfg, append([]tuple(nil), started...))
 	case "autoscale":
-		err = autoscaleServices(base, cfg, started, users)
+		err = autoscaleServices(base, cfg, append([]tuple(nil), started...), users, opts, track)
 	default:
 		err = probe.Run(cfg)
 	}

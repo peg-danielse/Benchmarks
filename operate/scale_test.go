@@ -44,25 +44,27 @@ func TestPercentile(t *testing.T) {
 }
 
 func TestReadWindow(t *testing.T) {
-	samples := []uint64{
-		1000 * uint64(time.Microsecond),
-		2000 * uint64(time.Microsecond),
-		3000 * uint64(time.Microsecond),
-		4000 * uint64(time.Microsecond),
+	rec := newRecorder()
+	before := rec.snapshot()
+	for i, us := range []uint64{1000, 2000, 3000, 4000} {
+		sh := rec.shard(i)
+		sh.sent.Add(1)
+		sh.add(us * uint64(time.Microsecond))
 	}
-	got := readWindow(
-		snap{sent: 10, done: 8, errs: 1},
-		snap{sent: 110, done: 104, errs: 3},
-		time.Second,
-		samples,
-	)
+	rec.shard(9).sent.Add(96)
+	rec.shard(9).errs.Add(2)
+	for i := 0; i < 92; i++ {
+		rec.shard(i).done.Add(1) // counted but outside the histogram: avg uses sum/done
+	}
+	got := readWindow(before, rec.snapshot(), time.Second)
 	if got.arrivalRate != 100 || got.serviceRate != 96 || got.errors != 2 {
 		t.Fatalf("rates %+v", got)
 	}
-	if math.Abs(got.avgUs-2500) > 0.1 {
+	if math.Abs(got.avgUs-10000.0/96) > 0.1 {
 		t.Fatalf("avg_us %v", got.avgUs)
 	}
-	if math.Abs(got.p95Us-4000) > 0.1 {
+	// 4000us sits in a bucket at most 12.5% wide.
+	if got.p95Us < 4000 || got.p95Us > 4000*1.125 {
 		t.Fatalf("p95_us %v", got.p95Us)
 	}
 }

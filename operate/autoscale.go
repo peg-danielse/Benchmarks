@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -43,17 +44,54 @@ const (
 // /start passes GOMAXPROCS=16 to each Go service, MEMCACHED_THREADS=16 to each
 // cache, and MONGO_WT_READ_TRANSACTIONS=16 plus MONGO_WT_WRITE_TRANSACTIONS=16
 // to mongod. The saturate max is the same 16.
-func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int) error {
+// clientOpts chooses how autoscale drives load.
+//
+// client "mercury" (default) starts bin/loadgen as a Mercury daemon with
+// POST /start, sets its home cpuset with POST /cpus, and attaches saturate
+// between genMin and genMax cores. The orchestrator then copies loadgen's
+// output file to stdout until loadgen exits.
+//
+// client "inproc" is the original client: this process pins itself to
+// clientFirstCPU-clientLastCPU and drives the routes itself.
+type clientOpts struct {
+	mode     string
+	bin      string
+	out      string
+	config   string
+	homeCPU  int
+	genMin   int
+	genMax   int
+	genProcs int
+	conns    int
+}
+
+const (
+	clientMercury = "mercury"
+	clientInproc  = "inproc"
+	loadgenID     = "hotel-loadgen"
+
+	defaultGenCPU   = 60
+	defaultGenMin   = 2
+	defaultGenMax   = 8
+	defaultGenProcs = 8
+)
+
+func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int, opts clientOpts, track func(tuple)) error {
 	homes, err := daemonHomes(len(lines))
 	if err != nil {
 		return err
 	}
-	if err := pinTasks(clientCPUs()); err != nil {
-		return err
+	if opts.mode == clientInproc {
+		if err := pinTasks(clientCPUs()); err != nil {
+			return err
+		}
+		runtime.GOMAXPROCS(len(clientCPUs()))
+		fmt.Printf("layout linux_cpus=64 mercury=0 homes=%d-%d max_cores=%d clients=%d-%d\n",
+			homes[0], homes[len(homes)-1], autoMaxCores, clientFirstCPU, clientLastCPU)
+	} else {
+		fmt.Printf("layout linux_cpus=64 mercury=0 homes=%d-%d max_cores=%d clients=mercury:%s home=%d saturate=%d-%d gomaxprocs=%d conns=%d\n",
+			homes[0], homes[len(homes)-1], autoMaxCores, loadgenID, opts.homeCPU, opts.genMin, opts.genMax, opts.genProcs, opts.conns)
 	}
-	runtime.GOMAXPROCS(len(clientCPUs()))
-	fmt.Printf("layout linux_cpus=64 mercury=0 homes=%d-%d max_cores=%d clients=%d-%d\n",
-		homes[0], homes[len(homes)-1], autoMaxCores, clientFirstCPU, clientLastCPU)
 	fmt.Print("homes")
 	for i, line := range lines {
 		spec := strconv.Itoa(homes[i])
@@ -73,6 +111,17 @@ func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int
 			return fmt.Errorf("deployment has no %s", name)
 		}
 	}
+	if opts.mode == clientInproc {
+		gen := &genMeter{cpus: inprocCPUs, busy: selfBusy, max: len(clientCPUs())}
+		return driveRoutes(cfg, maxUsers, os.Stdout, lines, gen)
+	}
+	return runMercuryLoadgen(base, lines, maxUsers, opts, track)
+}
+
+// driveRoutes ramps every hotel route together and prints one line per route
+// per window. Columns up to cpus match the earlier autoscaleN.out files; the
+// gen_* columns describe the load generator during that window.
+func driveRoutes(cfg boot.Config, maxUsers int, w io.Writer, lines []tuple, gen *genMeter) error {
 	routes, err := openRoutes(cfg, maxUsers)
 	defer stopRoutes(routes)
 	if err != nil {
@@ -84,13 +133,15 @@ func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int
 			route.rec.setActive(int32(clients))
 		}
 		for window := 0; window < autoWindows; window++ {
+			g0 := gen.begin()
 			readings := measureRoutes(routes)
+			gw := gen.end(g0)
 			cpus := cpuSetList(lines, readCPUSet)
 			for i, route := range routes {
 				reading := readings[i]
-				fmt.Printf("route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f errors %d cpus %s\n",
+				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f errors %d cpus %s %s\n",
 					route.name, clients, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.errors,
-					cpus)
+					cpus, gw)
 			}
 		}
 	}
@@ -141,14 +192,13 @@ func measureRoutes(routes []liveRoute) []reading {
 	befores := make([]snap, len(routes))
 	for i, route := range routes {
 		befores[i] = route.rec.snapshot()
-		route.rec.arm()
 	}
 	began := time.Now()
 	time.Sleep(scaleMeasure)
 	elapsed := time.Since(began)
 	out := make([]reading, len(routes))
 	for i, route := range routes {
-		out[i] = readWindow(befores[i], route.rec.snapshot(), elapsed, route.rec.disarm())
+		out[i] = readWindow(befores[i], route.rec.snapshot(), elapsed)
 	}
 	return out
 }

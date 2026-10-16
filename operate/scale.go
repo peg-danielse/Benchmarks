@@ -12,8 +12,6 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/boot"
@@ -49,6 +47,10 @@ const (
 	scaleUser = "Cornell_31"
 	scalePass = "1111111111"
 )
+
+// connsPerRoute is how many gRPC connections one route shares among its
+// workers (round-robin by worker index). 0 restores one connection per worker.
+var connsPerRoute = 16
 
 var scaleWidths = []int{1, 2, 4, 8, 16, 32}
 
@@ -196,7 +198,11 @@ func openLoad(cfg boot.Config, name string, workers int) (load, error) {
 	if err != nil {
 		return load{}, err
 	}
-	conns := make([]*grpc.ClientConn, workers)
+	n := workers
+	if connsPerRoute > 0 && connsPerRoute < n {
+		n = connsPerRoute
+	}
+	conns := make([]*grpc.ClientConn, n)
 	for i := range conns {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		conn, err := grpc.DialContext(ctx, addr, grpc.WithInsecure(), grpc.WithBlock())
@@ -234,7 +240,7 @@ func grpcCall(name string, conns []*grpc.ClientConn) (func(context.Context, int)
 			clients[i] = geo.NewGeoClient(conn)
 		}
 		return func(ctx context.Context, worker int) error {
-			res, err := clients[worker].Nearby(ctx, &geo.Request{Lat: scaleLat, Lon: scaleLon})
+			res, err := clients[worker%len(clients)].Nearby(ctx, &geo.Request{Lat: scaleLat, Lon: scaleLon})
 			if err != nil {
 				return err
 			}
@@ -249,7 +255,7 @@ func grpcCall(name string, conns []*grpc.ClientConn) (func(context.Context, int)
 			clients[i] = profile.NewProfileClient(conn)
 		}
 		return func(ctx context.Context, worker int) error {
-			res, err := clients[worker].GetProfiles(ctx, &profile.Request{HotelIds: []string{"1"}, Locale: "en"})
+			res, err := clients[worker%len(clients)].GetProfiles(ctx, &profile.Request{HotelIds: []string{"1"}, Locale: "en"})
 			if err != nil {
 				return err
 			}
@@ -264,7 +270,7 @@ func grpcCall(name string, conns []*grpc.ClientConn) (func(context.Context, int)
 			clients[i] = rate.NewRateClient(conn)
 		}
 		return func(ctx context.Context, worker int) error {
-			res, err := clients[worker].GetRates(ctx, &rate.Request{
+			res, err := clients[worker%len(clients)].GetRates(ctx, &rate.Request{
 				HotelIds: []string{"1"}, InDate: scaleIn, OutDate: scaleOut,
 			})
 			if err != nil {
@@ -281,7 +287,7 @@ func grpcCall(name string, conns []*grpc.ClientConn) (func(context.Context, int)
 			clients[i] = recommendation.NewRecommendationClient(conn)
 		}
 		return func(ctx context.Context, worker int) error {
-			res, err := clients[worker].GetRecommendations(ctx, &recommendation.Request{
+			res, err := clients[worker%len(clients)].GetRecommendations(ctx, &recommendation.Request{
 				Require: "rate", Lat: scaleLat, Lon: scaleLon,
 			})
 			if err != nil {
@@ -298,7 +304,7 @@ func grpcCall(name string, conns []*grpc.ClientConn) (func(context.Context, int)
 			clients[i] = user.NewUserClient(conn)
 		}
 		return func(ctx context.Context, worker int) error {
-			res, err := clients[worker].CheckUser(ctx, &user.Request{Username: scaleUser, Password: scalePass})
+			res, err := clients[worker%len(clients)].CheckUser(ctx, &user.Request{Username: scaleUser, Password: scalePass})
 			if err != nil {
 				return err
 			}
@@ -313,7 +319,7 @@ func grpcCall(name string, conns []*grpc.ClientConn) (func(context.Context, int)
 			clients[i] = reservation.NewReservationClient(conn)
 		}
 		return func(ctx context.Context, worker int) error {
-			res, err := clients[worker].CheckAvailability(ctx, &reservation.Request{
+			res, err := clients[worker%len(clients)].CheckAvailability(ctx, &reservation.Request{
 				HotelId: []string{"1", "2"}, InDate: scaleIn, OutDate: scaleOut, RoomNumber: 1,
 			})
 			if err != nil {
@@ -330,7 +336,7 @@ func grpcCall(name string, conns []*grpc.ClientConn) (func(context.Context, int)
 			clients[i] = search.NewSearchClient(conn)
 		}
 		return func(ctx context.Context, worker int) error {
-			res, err := clients[worker].Nearby(ctx, &search.NearbyRequest{
+			res, err := clients[worker%len(clients)].Nearby(ctx, &search.NearbyRequest{
 				Lat: scaleLat, Lon: scaleLon, InDate: scaleIn, OutDate: scaleOut,
 			})
 			if err != nil {
@@ -347,7 +353,7 @@ func grpcCall(name string, conns []*grpc.ClientConn) (func(context.Context, int)
 			clients[i] = review.NewReviewClient(conn)
 		}
 		return func(ctx context.Context, worker int) error {
-			res, err := clients[worker].GetReviews(ctx, &review.Request{HotelId: "1"})
+			res, err := clients[worker%len(clients)].GetReviews(ctx, &review.Request{HotelId: "1"})
 			if err != nil {
 				return err
 			}
@@ -362,7 +368,7 @@ func grpcCall(name string, conns []*grpc.ClientConn) (func(context.Context, int)
 			clients[i] = attractions.NewAttractionsClient(conn)
 		}
 		return func(ctx context.Context, worker int) error {
-			res, err := clients[worker].NearbyRest(ctx, &attractions.Request{HotelId: "1"})
+			res, err := clients[worker%len(clients)].NearbyRest(ctx, &attractions.Request{HotelId: "1"})
 			if err != nil {
 				return err
 			}
@@ -420,116 +426,10 @@ func clipBody(body []byte) string {
 	return s
 }
 
-type recorder struct {
-	wg      sync.WaitGroup
-	mu      sync.Mutex
-	gate    sync.Mutex
-	wake    sync.Cond
-	on      bool
-	samples []uint64
-	active  atomic.Int32
-	sent    atomic.Uint64
-	done    atomic.Uint64
-	errs    atomic.Uint64
-	lastErr atomic.Value
-}
-
-func newRecorder() *recorder {
-	rec := &recorder{}
-	rec.wake.L = &rec.gate
-	return rec
-}
-
-func (r *recorder) setActive(n int32) {
-	r.gate.Lock()
-	r.active.Store(n)
-	r.wake.Broadcast()
-	r.gate.Unlock()
-}
-
-// waitTurn blocks until this worker is inside the active prefix, or ctx is done.
-func (r *recorder) waitTurn(ctx context.Context, worker int) bool {
-	r.gate.Lock()
-	defer r.gate.Unlock()
-	for int32(worker) >= r.active.Load() && ctx.Err() == nil {
-		r.wake.Wait()
-	}
-	return ctx.Err() == nil
-}
-
-type snap struct {
-	sent uint64
-	done uint64
-	errs uint64
-}
-
-func (r *recorder) snapshot() snap {
-	return snap{sent: r.sent.Load(), done: r.done.Load(), errs: r.errs.Load()}
-}
-
-func (r *recorder) arm() {
-	r.mu.Lock()
-	r.samples = r.samples[:0]
-	r.on = true
-	r.mu.Unlock()
-}
-
-func (r *recorder) disarm() []uint64 {
-	r.mu.Lock()
-	r.on = false
-	out := append([]uint64(nil), r.samples...)
-	r.mu.Unlock()
-	return out
-}
-
-func (r *recorder) add(ns uint64) {
-	r.mu.Lock()
-	if r.on {
-		r.samples = append(r.samples, ns)
-	}
-	r.mu.Unlock()
-}
-
-func startLoad(ctx context.Context, call func(context.Context, int) error, workers, active int) *recorder {
-	rec := newRecorder()
-	rec.setActive(int32(active))
-	// Cancel has to wake parked workers or stop waits on them forever.
-	go func() {
-		<-ctx.Done()
-		rec.gate.Lock()
-		rec.wake.Broadcast()
-		rec.gate.Unlock()
-	}()
-	for worker := 0; worker < workers; worker++ {
-		rec.wg.Add(1)
-		go func(worker int) {
-			defer rec.wg.Done()
-			for rec.waitTurn(ctx, worker) {
-				start := time.Now()
-				rec.sent.Add(1)
-				cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				err := call(cctx, worker)
-				cancel()
-				if ctx.Err() != nil {
-					return
-				}
-				if err != nil {
-					rec.errs.Add(1)
-					rec.lastErr.Store(err.Error())
-					continue
-				}
-				rec.done.Add(1)
-				rec.add(uint64(time.Since(start)))
-			}
-		}(worker)
-	}
-	return rec
-}
-
 func waitReady(rec *recorder, name string) error {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if rec.done.Load() > 0 {
+		if rec.snapshot().done > 0 {
 			return nil
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -551,30 +451,26 @@ type reading struct {
 
 func measure(rec *recorder) reading {
 	before := rec.snapshot()
-	rec.arm()
 	began := time.Now()
 	time.Sleep(scaleMeasure)
 	after := rec.snapshot()
-	elapsed := time.Since(began)
-	samples := rec.disarm()
-	return readWindow(before, after, elapsed, samples)
+	return readWindow(before, after, time.Since(began))
 }
 
-func readWindow(before, after snap, elapsed time.Duration, samples []uint64) reading {
-	var sum uint64
-	for _, sample := range samples {
-		sum += sample
-	}
+// readWindow turns two recorder snapshots into one window's rates and times.
+// avg_us is exact (sum/count); p95_us comes from the log histogram.
+func readWindow(before, after snap, elapsed time.Duration) reading {
+	d := after.sub(before)
 	var avg float64
-	if len(samples) > 0 {
-		avg = float64(sum) / float64(len(samples))
+	if d.done > 0 {
+		avg = float64(d.sumNs) / float64(d.done)
 	}
 	return reading{
-		arrivalRate: perSecond(after.sent-before.sent, elapsed),
-		serviceRate: perSecond(after.done-before.done, elapsed),
+		arrivalRate: perSecond(d.sent, elapsed),
+		serviceRate: perSecond(d.done, elapsed),
 		avgUs:       avg / float64(time.Microsecond),
-		p95Us:       float64(percentile(samples, 0.95)) / float64(time.Microsecond),
-		errors:      after.errs - before.errs,
+		p95Us:       float64(d.percentile(0.95)) / float64(time.Microsecond),
+		errors:      d.errs,
 	}
 }
 
