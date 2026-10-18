@@ -26,9 +26,11 @@ chmod +x $t/sng; STRESS_NG=$t/sng PERTURB_CG=$t/cg python3 $here/perturb.py --me
 echo "--- counters (fake)"; PERTURB_COUNTERS=fake PERTURB_CG=$t/cg python3 $here/perturb.py --mercury http://127.0.0.1:18080 --daemon hotel-geo --kind remove --watch $t/op.out --clients 64 --timeout 20 --allowed 1-63 --counters cgroup --csv labels/c.csv --raw labels/cw.csv | grep -E "counters|wrote|level"
 python3 - <<PY2
 import csv; r=next(csv.DictReader(open("labels/c.csv")))
-print({k: r[k] for k in ["ipc_before","ipc_after","cache_mpki_before","llc_mpki_after","run_delay_ms_s_before","counters"]})
-assert r["ipc_before"] == "1.5000" and r["llc_mpki_after"] == "0.6667" and r["run_delay_ms_s_before"], r
-w=list(csv.DictReader(open("labels/cw.csv"))); assert w[0]["instructions"], w[0]
+print({k: r[k] for k in ["ipc_before","l2_mpki_after","stall_frac_before","l3_miss_rate_before","l3_mpki_after","df_gbs_before","sib_ghz_after","llc_mpki_after","run_delay_ms_s_before","counters"]})
+assert r["ipc_before"] == "1.5000" and r["l2_mpki_after"] == "1.3333" and r["stall_frac_before"] == "0.3000", r
+assert r["l3_miss_rate_before"] == "0.2500" and r["l3_mpki_after"] == "0.6667" and float(r["df_gbs_before"]) > 0, r
+assert r["llc_mpki_after"] == "" and r["run_delay_ms_s_before"], r  # unsupported event -> empty column
+w=list(csv.DictReader(open("labels/cw.csv"))); assert w[0]["instructions"] and w[0]["l3_miss"] and w[0]["df_ch4"] == "0", w[0]
 PY2
 echo "--- counters (real, must degrade on a fake cgroup)"; PERTURB_CG=$t/cg python3 $here/perturb.py --mercury http://127.0.0.1:18080 --daemon hotel-geo --kind remove --watch $t/op.out --clients 64 --timeout 20 --allowed 1-63 --counters cgroup --csv labels/d.csv --raw labels/dw.csv | grep -E "counters|wrote"
 grep -q "unavailable" labels/d.csv && echo DEGRADE-OK

@@ -37,7 +37,7 @@ import argparse, atexit, csv, json, os, signal, subprocess, sys, time, urllib.re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import FIELDS, STRESS_FIELDS, COUNTER_FIELDS
-from counters import Counters, derived, run_delay_ns
+from counters import ALL_EVENTS as RAW_EVENTS, Counters, derived, run_delay_ns
 from common import format_cpuset, parse_cpuset, parse_line, route_rows
 
 CG = os.environ.get("PERTURB_CG", "/sys/fs/cgroup/mercury")  # override for tests
@@ -272,6 +272,8 @@ def main():
     ap.add_argument("--state", default="labels/perturb_state.json")
     ap.add_argument("--counters", default="off", choices=["off", "cgroup", "cpu"],
                     help="hardware counters + run-delay: per target cgroup, or system-wide on the target's CPUs")
+    ap.add_argument("--zen", default="auto", choices=["auto", "off"],
+                    help="AMD family 17h raw events: L2, stalls, L3 slice (amd_l3), DRAM (amd_df), SMT sibling")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
     a = ap.parse_args()
 
@@ -369,7 +371,8 @@ def main():
 
     ctr = None
     if a.counters != "off":
-        ctr = Counters(a.counters, a.daemon, cpus[a.daemon] if a.counters == "cpu" else allowed, CG)
+        ctr = Counters(a.counters, a.daemon, cpus[a.daemon] if a.counters == "cpu" else allowed, CG,
+                       target_cpus=cpus[a.daemon], zen=a.zen)
         print("counters:", ctr.status(), flush=True)
 
     def csample():
@@ -461,15 +464,15 @@ def main():
             w.writerows(rows)
         def cnt(i):
             if not ctr:
-                return [""] * 5
+                return [""] * (len(RAW_EVENTS) + 1)
             sm = samples[i + len(samples) - len(got)]
-            return [("" if sm[1].get(k) is None else f"{sm[1][k]:.0f}") for k in ("cycles", "instructions", "cache_misses", "llc_load_misses")] + ["" if sm[2] is None else sm[2]]
+            return [("" if sm[1].get(k) is None else f"{sm[1][k]:.0f}") for k in RAW_EVENTS] + ["" if sm[2] is None else sm[2]]
         rnew = not os.path.exists(a.raw)
         with open(a.raw, "a", newline="") as f:
             w = csv.writer(f)
             if rnew:
                 w.writerow(["event_id", "t", "window", "phase", "clients", "route", "rate", "avg_us", "p95_us", "p99_us", "errors", "target_usage_usec", "partner_usage_usec",
-                        "cycles", "instructions", "cache_misses", "llc_load_misses", "run_delay_ns"])
+                        *RAW_EVENTS, "run_delay_ns"])
             for i, win in enumerate(got):
                 for route, r in sorted(win["routes"].items()):
                     w.writerow([eid, f"{win['t']:.3f}", i, win["phase"], r["clients"], route, r["rate"], r["avg"], r["p95"],
