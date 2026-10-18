@@ -28,7 +28,11 @@ case $SYS in
   *) echo "usage: $0 hotel|social OUTDIR 'operator flags' perturb-args..."; exit 2;;
 esac
 
-busy=$(pgrep -af 'dsb_ab\.sh|/build/mercury |/bin/loadgen|goperate|deathstar-.*/bin/|stress-ng|perturb\.py' | grep -v "^$$ " | grep -v pgrep)
+others() {  # benchmark processes: binaries under $B or $M, stress-ng, or our driver scripts (not text that merely mentions them)
+  ps -eo pid=,comm=,args= | awk -v B="$B/" -v M="$M/" -v self=$$ '$1 != self && (index($3, B) == 1 || index($3, M) == 1 || $2 == "stress-ng" || $2 == "mercury" ||
+    ($3 ~ /(^|\/)(bash|sh|python3?)$/ && $4 ~ /(dsb_ab|perturb|abc|sweep)\.sh$|(perturb|placer)\.py$/ && $4 !~ /abc\.sh$|perturb\.sh$/))'
+}
+busy=$(others)
 if [ -n "$busy" ]; then echo "REFUSING: benchmark processes are running:"; echo "$busy"; exit 3; fi
 if ls -d /sys/fs/cgroup/mercury/hotel-* /sys/fs/cgroup/mercury/social-* >/dev/null 2>&1; then
   echo "REFUSING: leftover Mercury app cgroups exist (someone else's run?)"; exit 3; fi
@@ -52,6 +56,7 @@ sleep 1; MPID=$(pgrep -f "^$M/build/mercury 8080 $MERCURY_CPU" | head -1)
 (cd $WD && exec taskset -c $OP_CPU $OP -mercury 127.0.0.1:8080 -cpu 2 -client mercury -gen-cpu $GEN_CPU -policy saturate -gen-out $RUN/loadgen.out $EXTRA autoscale) > $RUN/operate.out 2> $RUN/operate.err &
 OPID=$!
 for i in $(seq 120); do grep -q '^route ' $RUN/operate.out 2>/dev/null && break; sleep 1; done
+grep -q '^route ' $RUN/operate.out 2>/dev/null || { echo "operator produced no route lines (see $RUN/operate.out, operate.err)"; tail -3 $RUN/operate.out; exit 1; }
 taskset -c $HELPER_CPU python3 $HERE/perturb.py --prefix $PFX --watch $RUN/operate.out --state $RUN/state.json \
   --allowed $POOL --mercury-cpu $MERCURY_CPU --csv $(realpath -m $OUT)/perturb.csv --raw $(realpath -m $OUT)/perturb_windows.csv "$@" &
 PPID_=$!; wait $PPID_; rc=$?; PPID_=""

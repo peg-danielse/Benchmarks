@@ -317,10 +317,20 @@ def main():
                  "split": "heldout" if f"{a.stressor}:{a.stress_placement}" in held else "train"}
     else:
         if a.kind in ("smt", "l3") and not partner:
+            # busiest other daemon whose CPUs offer a usable sibling / L3 peer (e.g. not Mercury's CPU)
             u0 = {d: usage_usec(d) or 0 for d in daemons}
             time.sleep(1.0)
-            partner = max((d for d in daemons if d != a.daemon), key=lambda d: (usage_usec(d) or 0) - u0[d])
-        pert, partner, note = plan_perturbation(a.kind, a.daemon, partner, cpus, a.mercury_cpu, allowed)
+            ranked = sorted((d for d in daemons if d != a.daemon), key=lambda d: -((usage_usec(d) or 0) - u0[d]))
+            for cand in ranked:
+                try:
+                    pert, partner, note = plan_perturbation(a.kind, a.daemon, cand, cpus, a.mercury_cpu, allowed)
+                    break
+                except SystemExit as e:
+                    print(f"partner {cand} skipped: {e}", flush=True)
+            else:
+                raise SystemExit(f"{a.kind}: no daemon offers a usable CPU")
+        else:
+            pert, partner, note = plan_perturbation(a.kind, a.daemon, partner, cpus, a.mercury_cpu, allowed)
     print(f"target {a.daemon} {orig[a.daemon]} -> {format_cpuset(pert)} kind {a.kind} {note} levels {levels} plan {plan} split {sinfo['split']}", flush=True)
     if a.dry_run:
         return
@@ -338,6 +348,8 @@ def main():
             stress.stop()
         errs = []
         for d, spec in orig.items():
+            if not os.path.isdir(f"{CG}/{d}"):
+                continue  # daemon already gone (operator exited): nothing to restore
             try:
                 if rd(f"{CG}/{d}/cpuset.cpus") != spec:
                     set_cpus(a.mercury, d, spec)
@@ -345,6 +357,8 @@ def main():
                 errs.append(str(e))
         if a.restore_policy != "none":
             for d in daemons:
+                if not os.path.isdir(f"{CG}/{d}"):
+                    continue
                 try:
                     set_policy(a.mercury, d, a.restore_policy, a.min, a.max, a.scale_placement)
                 except Exception as e:

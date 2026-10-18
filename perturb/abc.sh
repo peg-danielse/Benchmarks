@@ -30,7 +30,10 @@ MODES=${MODES:-none static react-thread react-cgroup}; STRESS=${STRESS:-off on}
 POLICY=${POLICY:-saturate}; OPF=${OPF:--users 2048 -window-ms 2500}
 SNG=$B/stress-ng/stress-ng
 
-others() { pgrep -af 'dsb_ab\.sh|/build/mercury |/bin/loadgen|goperate|deathstar-.*/bin/|stress-ng|perturb\.py|placer\.py' | grep -v "^$$ " | grep -v pgrep; }
+others() {  # benchmark processes: binaries under $B or $M, stress-ng, or our driver scripts (not text that merely mentions them)
+  ps -eo pid=,comm=,args= | awk -v B="$B/" -v M="$M/" -v self=$$ '$1 != self && (index($3, B) == 1 || index($3, M) == 1 || $2 == "stress-ng" || $2 == "mercury" ||
+    ($3 ~ /(^|\/)(bash|sh|python3?)$/ && $4 ~ /(dsb_ab|perturb|abc|sweep)\.sh$|(perturb|placer)\.py$/ && $4 !~ /abc\.sh$|perturb\.sh$/))'
+}
 if [ -n "$(others)" ] || ls -d /sys/fs/cgroup/mercury/hotel-* /sys/fs/cgroup/mercury/social-* >/dev/null 2>&1; then
   echo "REFUSING: other benchmark processes or app cgroups exist:"; others; exit 3; fi
 
