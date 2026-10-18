@@ -10,9 +10,20 @@ import (
 	"time"
 )
 
-const (
-	root   = "/home/paul/Benchmarks"
+// root is the Benchmarks checkout; DSB_ROOT overrides it.
+var (
+	root   = envOr("DSB_ROOT", "/home/paul/Benchmarks")
 	snRoot = root + "/deathstar-socialNetwork"
+)
+
+func envOr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+
+const (
 
 	autoMaxCores = 16
 	autoWindows  = 4
