@@ -29,6 +29,9 @@ def main():
     ev = dict(CORE)
     if core is not None and C.cpu_family() == 0x17:
         ev.update({k: (core, C.ZEN1_CORE[k]) for k in ("l2_miss", "stall_fe", "stall_be")})
+    else:  # Intel etc.: generic cache-misses = LLC misses on Intel
+        ev["cache_misses"] = (0, 3)
+    sib_of = {c: [x for x in C._siblings(c) if x != c] for c in cpus}
     for c in cpus:
         for k, (t, cfg) in ev.items():
             specs[("cpu", c, k)] = (t, cfg, c)
@@ -84,6 +87,11 @@ def main():
                 r["ipc"] = round(agg["instructions"] / agg["cycles"], 3)
                 if "stall_fe" in agg:
                     r["stall_frac"] = round((agg["stall_fe"] + agg["stall_be"]) / agg["cycles"], 3)
+            sibs = {x for c in cs for x in sib_of.get(c, []) if x not in cs}
+            if sibs:
+                r["sib_ghz"] = round(sum(delta.get(("cpu", x, "cycles"), 0) for x in sibs) / a.period_s / 1e9, 3)
+            if agg.get("instructions") and "cache_misses" in agg:
+                r["llc_mpki"] = round(1000 * agg["cache_misses"] / agg["instructions"], 2)
             if agg.get("instructions") and "l2_miss" in agg:
                 r["l2_mpki"] = round(1000 * agg["l2_miss"] / agg["instructions"], 2)
             rec["daemons"][d] = r

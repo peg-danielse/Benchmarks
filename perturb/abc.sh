@@ -27,7 +27,8 @@ case $SYS in
   *) echo "usage: $0 hotel|social OUTDIR [REPS]"; exit 2;;
 esac
 MODES=${MODES:-none static react-thread react-cgroup}; STRESS=${STRESS:-off on}
-POLICY=${POLICY:-saturate}; OPF=${OPF:--users 2048 -window-ms 2500}
+POLICY=${POLICY:-saturate}; OPF=${OPF:--users 2048 -window-ms 2500 -gen-min ${GEN_MIN:-6}}
+# -gen-min: fixed load-generator CPU floor, equal in every mode (it otherwise sat at its 2-CPU minimum under saturate)
 SNG=$B/stress-ng/stress-ng
 
 others() {  # benchmark processes: binaries under $B or $M, stress-ng, or our driver scripts (not text that merely mentions them)
@@ -41,7 +42,7 @@ RUN=$OUT/$(date +%Y%m%d-%H%M%S); mkdir -p $RUN
 killcg() { for c in /sys/fs/cgroup/mercury/$PFX*; do [ -d $c ] && echo 1 | sudo -n tee $c/cgroup.kill >/dev/null; done; sleep 1; for c in /sys/fs/cgroup/mercury/$PFX*; do [ -d $c ] && sudo -n rmdir $c 2>/dev/null; done; }
 stop_run() {
   [ -n "${PLPID:-}" ] && sudo -n kill -TERM $PLPID 2>/dev/null; for i in $(seq 25); do sudo -n kill -0 ${PLPID:-0} 2>/dev/null || break; sleep 0.2; done; PLPID=""
-  pkill -u $(id -u) -f "^$SNG" 2>/dev/null; [ -n "${CLPID:-}" ] && kill $CLPID 2>/dev/null; CLPID=""
+  pkill -u $(id -u) -f "^$SNG" 2>/dev/null; [ -n "${CLPID:-}" ] && sudo -n kill $CLPID 2>/dev/null; CLPID=""
   [ -n "${OPID:-}" ] && kill -INT $OPID 2>/dev/null; for i in $(seq 50); do kill -0 ${OPID:-0} 2>/dev/null || break; sleep 0.2; done; OPID=""
   killcg
   [ -n "${MPID:-}" ] && sudo -n kill -TERM $MPID 2>/dev/null; for i in $(seq 50); do kill -0 ${MPID:-0} 2>/dev/null || break; sleep 0.2; done; MPID=""
@@ -57,7 +58,7 @@ for r in $(seq 1 $REPS); do for mode in $MODES; do for st in $STRESS; do
   (cd $WD && exec taskset -c $OP_CPU $OP -mercury 127.0.0.1:8080 -cpu 2 -client mercury -gen-cpu $GEN_CPU $PARGS -gen-out $D/loadgen.out $OPF autoscale) > $D/operate.out 2> $D/operate.err &
   OPID=$!
   for i in $(seq 300); do [ -d /sys/fs/cgroup/mercury/${PFX}loadgen ] && break; sleep 1; done
-  taskset -c $HELPER_CPU python3 $HERE/ctrlog.py --prefix $PFX --cpus $POOL --out $D/counters.jsonl & CLPID=$!
+  sudo -n taskset -c $HELPER_CPU python3 $HERE/ctrlog.py --prefix $PFX --cpus $POOL --out $D/counters.jsonl & CLPID=$!
   if [ $st = on ]; then
     taskset -c $STRESS_CACHE_CPUS $SNG --cache $(ncpus $STRESS_CACHE_CPUS) --taskset $STRESS_CACHE_CPUS --timeout 3600s --quiet &
     taskset -c $STRESS_STREAM_CPUS $SNG --stream $(ncpus $STRESS_STREAM_CPUS) --taskset $STRESS_STREAM_CPUS --timeout 3600s --quiet &
