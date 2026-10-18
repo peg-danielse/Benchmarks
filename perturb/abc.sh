@@ -2,6 +2,7 @@
 # A/B/C placement experiment: who decides where threads run, with and without interference.
 #   modes:  none | static | react-thread | react-cgroup   (placer.py side-car; Mercury only sizes)
 #           gnn-pin                                       (Kurt's built-in pin(), POLICY must be gnn)
+#           bare                                          (no side-car at all: the plain policy baseline)
 #   stress: off | on   (on = stress-ng --cache on $STRESS_CACHE_CPUS and --stream on $STRESS_STREAM_CPUS (dtn-01: 33-40, 41-47: the SMT siblings of
 #                       the home cores, started when the load generator starts)
 #   abc.sh hotel|social OUTDIR [REPS]
@@ -63,7 +64,7 @@ for r in $(seq 1 $REPS); do for mode in $MODES; do for st in $STRESS; do
     taskset -c $STRESS_CACHE_CPUS $SNG --cache $(ncpus $STRESS_CACHE_CPUS) --taskset $STRESS_CACHE_CPUS --timeout 3600s --quiet &
     taskset -c $STRESS_STREAM_CPUS $SNG --stream $(ncpus $STRESS_STREAM_CPUS) --taskset $STRESS_STREAM_CPUS --timeout 3600s --quiet &
   fi
-  case $mode in gnn-pin) ;; *) sudo -n taskset -c $HELPER_CPU python3 $HERE/placer.py --mode $mode --prefix $PFX --allowed $POOL --log $D/placer.jsonl & PLPID=$!;; esac
+  case $mode in gnn-pin|bare) ;; *) sudo -n taskset -c $HELPER_CPU python3 $HERE/placer.py --mode $mode --prefix $PFX --allowed $POOL --log $D/placer.jsonl & PLPID=$!;; esac
   wait $OPID; echo "  operator exit $? routes=$(grep -c ^route $D/operate.out)"; OPID=""
   stop_run
 done; done; done
