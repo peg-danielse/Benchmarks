@@ -18,7 +18,7 @@ import argparse, csv, glob, json, os, sys, time
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import FIELDS, STRESS_FIELDS, count_cpus, group_windows, parse_line, route_rows
+from common import FIELDS, STRESS_FIELDS, COUNTER_FIELDS, count_cpus, group_windows, parse_line, route_rows
 
 HOME = os.path.expanduser("~")
 
@@ -121,7 +121,7 @@ def main():
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS + STRESS_FIELDS, restval="")
+        w = csv.DictWriter(f, fieldnames=FIELDS + STRESS_FIELDS + COUNTER_FIELDS, restval="")
         w.writeheader()
         w.writerows(rows)
 

@@ -19,6 +19,8 @@ FIELDS = [
 ]
 # Interference labels (empty for plain perturbations and weak labels).
 STRESS_FIELDS = ["stressor", "stress_placement", "intensity", "stress_cpus", "stress_workers", "split"]
+# Optional counters (perturb.py --counters cgroup|cpu): target daemon (cgroup scope) or its CPUs (cpu scope).
+COUNTER_FIELDS = [f"{m}_{ph}" for m in ("ipc", "cache_mpki", "llc_mpki", "run_delay_ms_s") for ph in ("before", "after")] + ["counters"]
 
 
 def parse_line(line):

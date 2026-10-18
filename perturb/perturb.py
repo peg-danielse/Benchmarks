@@ -36,7 +36,9 @@ stressor/placement/intensity and split=train|heldout (--heldout mixes, e.g.
 import argparse, atexit, csv, json, os, signal, subprocess, sys, time, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import FIELDS, STRESS_FIELDS, format_cpuset, parse_cpuset, parse_line, route_rows
+from common import FIELDS, STRESS_FIELDS, COUNTER_FIELDS
+from counters import Counters, derived, run_delay_ns
+from common import format_cpuset, parse_cpuset, parse_line, route_rows
 
 CG = os.environ.get("PERTURB_CG", "/sys/fs/cgroup/mercury")  # override for tests
 SYS = "/sys/devices/system/cpu"
@@ -268,6 +270,8 @@ def main():
     ap.add_argument("--csv", default="labels/perturb.csv")
     ap.add_argument("--raw", default="labels/perturb_windows.csv")
     ap.add_argument("--state", default="labels/perturb_state.json")
+    ap.add_argument("--counters", default="off", choices=["off", "cgroup", "cpu"],
+                    help="hardware counters + run-delay: per target cgroup, or system-wide on the target's CPUs")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
     a = ap.parse_args()
 
@@ -363,6 +367,14 @@ def main():
         else:
             set_cpus(a.mercury, a.daemon, pert if phase == "B" else orig[a.daemon])
 
+    ctr = None
+    if a.counters != "off":
+        ctr = Counters(a.counters, a.daemon, cpus[a.daemon] if a.counters == "cpu" else allowed, CG)
+        print("counters:", ctr.status(), flush=True)
+
+    def csample():
+        return (time.time(), ctr.sample() if ctr else {}, run_delay_ns(CG, a.daemon) if ctr else None)
+
     for d in daemons:
         set_policy(a.mercury, d, "none", a.min, a.max, a.scale_placement)
     print("froze", len(daemons), "daemons", flush=True)
@@ -373,6 +385,7 @@ def main():
     while todo:
         want = todo[0]
         got, uses, state, warm = [], [], "A", want != 0
+        samples = []
         for routes in gen:
             lvl = next(iter(routes.values()))["clients"]
             if want and lvl < seen_max and lvl < want:  # operator is ramping down: level missed
@@ -383,13 +396,17 @@ def main():
                 continue
             if warm:
                 warm = False
+                samples = [csample()]
                 continue
+            if not samples:
+                samples = [csample()]  # no warm-up: first window has no counter baseline
             if got and lvl != got[0]["clients"]:
                 print(f"level changed mid-plan at {want}; keeping {len(got)} windows", flush=True)
                 break
             now = time.time()
             uses.append((now, usage_usec(a.daemon), usage_usec(partner) if partner else None))
             got.append(wrap(routes, state, now))
+            samples.append(csample())
             print(f"window {len(got)} phase {state} clients {lvl} " +
                   " ".join(f"{k}={v['rate']:.0f}/{v['p95']:.0f}us" for k, v in sorted(routes.items())), flush=True)
             if len(got) >= len(plan):
@@ -399,11 +416,14 @@ def main():
                 apply(state)
         if state == "B":
             apply("A")
-        results.append((want, got, uses))
+        results.append((want, got, uses, samples))
         todo.pop(0)
     restore()
+    cstatus = ctr.status() if ctr else ""
+    if ctr:
+        ctr.close()
 
-    for want, got, uses in results:
+    for want, got, uses, samples in results:
         before = [w for w in got if w["phase"] == "A"]
         after = [w for w in got if w["phase"] == "B"]
 
@@ -423,22 +443,37 @@ def main():
                 "cores_before": len(cpus[a.daemon]), "cores_after": len(pert),
                 "usage_cores_before": cores("A"), "usage_cores_after": cores("B"),
                 "valid": valid, "note": note, **sinfo}
+        if ctr:
+            # samples[i+1] closes window i; samples[0] is its start (or window 0's end without warm-up)
+            off = len(samples) - len(got)
+            pairs = {ph: [(samples[i - 1 + off], samples[i + off]) for i in range(len(got)) if got[i]["phase"] == ph and i - 1 + off >= 0]
+                     for ph in ("A", "B")}
+            da, db = derived(pairs["A"]), derived(pairs["B"])
+            for k in da:
+                base[f"{k}_before"], base[f"{k}_after"] = da[k], db[k]
+            base["counters"] = f"{a.counters}: {cstatus}"
         rows = route_rows(base, before, after) if before and after else []
         new = not os.path.exists(a.csv)
         with open(a.csv, "a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=FIELDS + STRESS_FIELDS)
+            w = csv.DictWriter(f, fieldnames=FIELDS + STRESS_FIELDS + COUNTER_FIELDS, restval="")
             if new:
                 w.writeheader()
             w.writerows(rows)
+        def cnt(i):
+            if not ctr:
+                return [""] * 5
+            sm = samples[i + len(samples) - len(got)]
+            return [("" if sm[1].get(k) is None else f"{sm[1][k]:.0f}") for k in ("cycles", "instructions", "cache_misses", "llc_load_misses")] + ["" if sm[2] is None else sm[2]]
         rnew = not os.path.exists(a.raw)
         with open(a.raw, "a", newline="") as f:
             w = csv.writer(f)
             if rnew:
-                w.writerow(["event_id", "t", "window", "phase", "clients", "route", "rate", "avg_us", "p95_us", "p99_us", "errors", "target_usage_usec", "partner_usage_usec"])
+                w.writerow(["event_id", "t", "window", "phase", "clients", "route", "rate", "avg_us", "p95_us", "p99_us", "errors", "target_usage_usec", "partner_usage_usec",
+                        "cycles", "instructions", "cache_misses", "llc_load_misses", "run_delay_ns"])
             for i, win in enumerate(got):
                 for route, r in sorted(win["routes"].items()):
                     w.writerow([eid, f"{win['t']:.3f}", i, win["phase"], r["clients"], route, r["rate"], r["avg"], r["p95"],
-                                r["p99"] if r["p99"] is not None else "", r["errors"], uses[i][1], uses[i][2] or ""])
+                                r["p99"] if r["p99"] is not None else "", r["errors"], uses[i][1], uses[i][2] or ""] + cnt(i))
         for r in rows:
             print(f"[{want}] {r['route']}: rate {r['d_rate_pct']}% p95 {r['d_p95_pct']}% p99 {r['d_p99_pct']}%")
         print(f"level {want}: {len(rows)} rows to {a.csv} (valid={valid}, usage cores A {base['usage_cores_before']} B {base['usage_cores_after']})")

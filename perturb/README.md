@@ -55,3 +55,21 @@ In the tools: `--kind stress --stressor cpu|cache|stream|vm|matrix --placement c
 - Weak labels are confounded (policy picks the moment); `valid=1` keeps only clean single-daemon
   changes at constant users with a settled after-state. Hotel `.out` files have no cpu.stat, so
   `usage_cores_*` is empty there.
+
+## Optional counters (`--counters cgroup|cpu`)
+
+`counters.py` opens hardware counters with perf_event_open(2) directly (same kernel interface and
+permissions as `perf stat`; the `perf` binary is **not installed** on dtn-01, so it is not used):
+cycles, instructions, cache-misses and LLC read misses, either for the target daemon's cgroup
+(`cgroup`, counted on every CPU in `--allowed`) or system-wide on the target's CPUs (`cpu`). It also
+sums `/proc/<tid>/schedstat` run-delay over the daemon's threads (`cgroup.threads`).
+
+Extra columns: `ipc_*`, `cache_mpki_*`, `llc_mpki_*` (misses per 1k instructions), `run_delay_ms_s_*`
+(ms runqueue wait per second), with `_before` = A windows, `_after` = B windows, plus `counters`
+(backend status). Raw cumulative counts go to the windows CSV.
+
+Permissions: dtn-01 has `kernel.perf_event_paranoid = -1`, so cgroup/CPU-wide events work as paul.
+If it is raised to 1 or higher, events fail and the columns stay empty, with the reason in
+`counters`. To re-enable: `sudo sysctl kernel.perf_event_paranoid=-1` (or 0), or give python3 CAP_PERFMON.
+Zen 1 (EPYC 7301) may not map the generic LLC event (ENOENT): `llc_mpki` is then empty and
+`cache_mpki` (generic cache-misses) is the fallback. If you want `perf stat`, install `linux-perf`.

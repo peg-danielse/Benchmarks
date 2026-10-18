@@ -15,7 +15,7 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", 18080), H).serve_forever()
 PY
 python3 $t/merc.py & sleep 0.5; : > $t/op.out
-( for i in $(seq 1 20); do sleep 0.4; g=$(cat $t/cg/hotel-geo/cpuset.cpus); p=$([ "$g" = 6 ] && echo 900 || echo 500)
+( for i in $(seq 1 45); do sleep 0.4; g=$(cat $t/cg/hotel-geo/cpuset.cpus); p=$([ "$g" = 6 ] && echo 900 || echo 500)
   for r in geo search; do echo "route $r clients 64 arrival_rate 1000 service_rate 1000 avg_us 400 p95_us $p p99_us 2000 errors 0 cpus geo=$g mongod=5 gen_cpus 60 gen_busy_ms 1 gen_resized 0 gen_bound 0" >> $t/op.out; done; done ) &
 cd $t && PERTURB_CG=$t/cg python3 $here/perturb.py --mercury http://127.0.0.1:18080 --daemon hotel-geo --kind remove --watch $t/op.out --clients 64 --timeout 20 --allowed 1-63
 cat > $t/sng <<SH
@@ -23,4 +23,13 @@ cat > $t/sng <<SH
 echo "\$@" >> $t/stress_calls; exec sleep 100
 SH
 chmod +x $t/sng; STRESS_NG=$t/sng PERTURB_CG=$t/cg python3 $here/perturb.py --mercury http://127.0.0.1:18080 --daemon hotel-geo --kind stress --stressor stream --placement l3 --intensity high --watch $t/op.out --clients 64 --timeout 20 --allowed 1-63 --csv labels/s.csv || true; cat $t/stress_calls; pgrep -f $t/sng && echo LEAK || echo nostress; cut -d, -f6,14,24,32- labels/s.csv
+echo "--- counters (fake)"; PERTURB_COUNTERS=fake PERTURB_CG=$t/cg python3 $here/perturb.py --mercury http://127.0.0.1:18080 --daemon hotel-geo --kind remove --watch $t/op.out --clients 64 --timeout 20 --allowed 1-63 --counters cgroup --csv labels/c.csv --raw labels/cw.csv | grep -E "counters|wrote|level"
+python3 - <<PY2
+import csv; r=next(csv.DictReader(open("labels/c.csv")))
+print({k: r[k] for k in ["ipc_before","ipc_after","cache_mpki_before","llc_mpki_after","run_delay_ms_s_before","counters"]})
+assert r["ipc_before"] == "1.5000" and r["llc_mpki_after"] == "0.6667" and r["run_delay_ms_s_before"], r
+w=list(csv.DictReader(open("labels/cw.csv"))); assert w[0]["instructions"], w[0]
+PY2
+echo "--- counters (real, must degrade on a fake cgroup)"; PERTURB_CG=$t/cg python3 $here/perturb.py --mercury http://127.0.0.1:18080 --daemon hotel-geo --kind remove --watch $t/op.out --clients 64 --timeout 20 --allowed 1-63 --counters cgroup --csv labels/d.csv --raw labels/dw.csv | grep -E "counters|wrote"
+grep -q "unavailable" labels/d.csv && echo DEGRADE-OK
 cat $t/calls; cat labels/perturb.csv | cut -d, -f6-26; test ! -e labels/perturb_state.json && grep -q '6,22' $t/cg/hotel-geo/cpuset.cpus && echo PASS
