@@ -184,8 +184,8 @@ func sweepService(base string, cfg boot.Config, line tuple, home string) error {
 		}
 		time.Sleep(scaleWarmup)
 		reading := measure(rec)
-		fmt.Printf("service %s cores %d cpus %s arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f errors %d\n",
-			name, cores, spec, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.errors)
+		fmt.Printf("service %s cores %d cpus %s arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d\n",
+			name, cores, spec, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.p99Us, reading.errors)
 	}
 	return setCpus(base, line.id, home)
 }
@@ -446,6 +446,7 @@ type reading struct {
 	serviceRate uint64
 	avgUs       float64
 	p95Us       float64
+	p99Us       float64
 	errors      uint64
 }
 
@@ -470,6 +471,7 @@ func readWindow(before, after snap, elapsed time.Duration) reading {
 		serviceRate: perSecond(d.done, elapsed),
 		avgUs:       avg / float64(time.Microsecond),
 		p95Us:       float64(d.percentile(0.95)) / float64(time.Microsecond),
+		p99Us:       float64(d.percentile(0.99)) / float64(time.Microsecond),
 		errors:      d.errs,
 	}
 }
