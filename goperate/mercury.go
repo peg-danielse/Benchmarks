@@ -272,12 +272,33 @@ func rampClients(maxUsers int) []int {
 	return clients
 }
 func enableSaturate(base, id string, minCores, maxCores int) error {
-	status, body, err := post(base, "/scale", map[string]any{
+	return enableScale(base, id, "saturate", minCores, maxCores)
+}
+
+// Policy for the service daemons (-policy, -tick-ms, -placement). The load generator stays on saturate.
+var (
+	servicePolicy    = "saturate"
+	serviceTickMs    = 10
+	servicePlacement = "least_loaded"
+	servicePin       = true              // -pin: gnn pins busy threads (false: cpuset sizing only)
+	saturateOnly     = map[string]bool{} // program base names kept on saturate under -policy gnn
+)
+
+// enableScale attaches policy (saturate or gnn) to a daemon with the -placement core hand-out.
+// tick_ms is sent for gnn only.
+func enableScale(base, id, policy string, minCores, maxCores int) error {
+	req := map[string]any{
 		"daemon_id": id,
-		"policy":    "saturate",
+		"policy":    policy,
 		"min":       minCores,
 		"max":       maxCores,
-	})
+		"placement": servicePlacement,
+	}
+	if policy == "gnn" {
+		req["tick_ms"] = serviceTickMs
+		req["pin"] = servicePin
+	}
+	status, body, err := post(base, "/scale", req)
 	if err != nil {
 		return err
 	}
@@ -348,6 +369,7 @@ type reading struct {
 	serviceRate uint64
 	avgUs       float64
 	p95Us       float64
+	p99Us       float64
 	errors      uint64
 }
 
@@ -362,6 +384,7 @@ func readWindow(before, after snap, elapsed time.Duration) reading {
 		serviceRate: perSecond(d.done, elapsed),
 		avgUs:       avg / float64(time.Microsecond),
 		p95Us:       float64(d.percentile(0.95)) / float64(time.Microsecond),
+		p99Us:       float64(d.percentile(0.99)) / float64(time.Microsecond),
 		errors:      d.errs,
 	}
 }

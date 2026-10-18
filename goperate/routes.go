@@ -532,13 +532,16 @@ func stopRoutes(routes []liveRoute) {
 	}
 }
 
+// windowMs is the autoscale measurement window (-window-ms, LOADGEN_WINDOW_MS); default 1 s.
+var windowMs = 1000
+
 func measureRoutes(routes []liveRoute) []reading {
 	befores := make([]snap, len(routes))
 	for i, route := range routes {
 		befores[i] = route.rec.snapshot()
 	}
 	began := time.Now()
-	time.Sleep(scaleMeasure)
+	time.Sleep(time.Duration(windowMs) * time.Millisecond)
 	elapsed := time.Since(began)
 	out := make([]reading, len(routes))
 	for i, route := range routes {

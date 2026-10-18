@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -58,6 +59,12 @@ func main() {
 	genMin := flag.Int("gen-min", defaultGenMin, "loadgen saturate min cores")
 	genMax := flag.Int("gen-max", defaultGenMax, "loadgen saturate max cores")
 	genProcs := flag.Int("gen-procs", defaultGenProcs, "loadgen GOMAXPROCS (keep >= gen-max so busy threads can exceed cores)")
+	satOnly := flag.String("saturate-only", "", "comma-separated program names kept on saturate when -policy gnn (e.g. rabbitmq-server)")
+	pin := flag.Bool("pin", true, "with -policy gnn: pin busy threads to CPUs (false = only size cpusets)")
+	window := flag.Int("window-ms", 1000, "autoscale measurement window in ms (4 windows per user step)")
+	policy := flag.String("policy", "saturate", "autoscale policy for the service daemons: saturate or gnn (the load generator stays on saturate)")
+	tickMs := flag.Int("tick-ms", 10, "gnn decision tick in ms (sent with -policy gnn)")
+	placement := flag.String("placement", "least_loaded", "core hand-out for /scale: least_loaded or nearest_first")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: goperate [flags] start|stop|init|autoscale\n\n")
 		flag.PrintDefaults()
@@ -67,6 +74,22 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+	if *policy != "saturate" && *policy != "gnn" || *placement != "least_loaded" && *placement != "nearest_first" || *tickMs < 10 {
+		fmt.Fprintln(os.Stderr, "need -policy saturate|gnn, -placement least_loaded|nearest_first, -tick-ms >= 10")
+		os.Exit(2)
+	}
+	if *window < 100 {
+		fmt.Fprintln(os.Stderr, "need -window-ms >= 100")
+		os.Exit(2)
+	}
+	windowMs = *window
+	servicePin = *pin
+	for _, n := range strings.Split(*satOnly, ",") {
+		if n != "" {
+			saturateOnly[n] = true
+		}
+	}
+	servicePolicy, serviceTickMs, servicePlacement = *policy, *tickMs, *placement
 	cmd := flag.Arg(0)
 	switch cmd {
 	case "start", "stop", "init", "autoscale":
