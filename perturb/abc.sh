@@ -2,7 +2,7 @@
 # A/B/C placement experiment: who decides where threads run, with and without interference.
 #   modes:  none | static | react-thread | react-cgroup   (placer.py side-car; Mercury only sizes)
 #           gnn-pin                                       (Kurt's built-in pin(), POLICY must be gnn)
-#   stress: off | on   (on = stress-ng --cache on CPUs 33-40 and --stream on 41-47: the SMT siblings of
+#   stress: off | on   (on = stress-ng --cache on $STRESS_CACHE_CPUS and --stream on $STRESS_STREAM_CPUS (dtn-01: 33-40, 41-47: the SMT siblings of
 #                       the home cores, started when the load generator starts)
 #   abc.sh hotel|social OUTDIR [REPS]
 # Env: MODES, STRESS ("off on"), POLICY ("saturate" or "gnn"; gnn runs with -pin=false except gnn-pin),
@@ -12,7 +12,15 @@
 # operator, app cgroups, Mercury.
 set -u
 SYS=$1; OUT=$(realpath -m $2); REPS=${3:-1}
-B=/home/paul/Benchmarks; M=/home/paul/Mercury; HERE=$(cd "$(dirname "$0")" && pwd)
+# Host layout: defaults are dtn-01 (64 CPUs). hosts/$(hostname -s).env, or HOST_ENV=file, overrides them.
+HERE=$(cd "$(dirname "$0")" && pwd)
+HOST_ENV=${HOST_ENV:-$HERE/hosts/$(hostname -s).env}; [ -f "$HOST_ENV" ] && . "$HOST_ENV"
+B=${DSB_ROOT:-/home/paul/Benchmarks}; M=${MERCURY_ROOT:-/home/paul/Mercury}; export DSB_ROOT=$B
+MERCURY_CPU=${MERCURY_CPU:-0}; POOL=${POOL:-1-60}; GEN_CPU=${GEN_CPU:-60}
+OP_CPU=${OP_CPU:-61}; HELPER_CPU=${HELPER_CPU:-62}
+STRESS_CACHE_CPUS=${STRESS_CACHE_CPUS:-33-40}; STRESS_STREAM_CPUS=${STRESS_STREAM_CPUS:-41-47}
+pool_list() { python3 -c "import sys; sys.path.insert(0, '$HERE'); from common import parse_cpuset; print(' '.join(map(str, parse_cpuset('$POOL'))))"; }
+ncpus() { python3 -c "import sys; sys.path.insert(0, '$HERE'); from common import parse_cpuset; print(len(parse_cpuset('$1')))"; }
 case $SYS in
   hotel) WD=$B/deathstar-hotelReservations; OP=$WD/bin/loadgen; PFX=hotel-;;
   social) WD=$B/deathstar-socialNetwork; OP=$WD/goperate/bin/goperate; PFX=social-;;
@@ -40,18 +48,18 @@ trap stop_run EXIT; trap 'exit 130' INT TERM HUP
 for r in $(seq 1 $REPS); do for mode in $MODES; do for st in $STRESS; do
   D=$RUN/$r-$mode-stress$st; mkdir -p $D; echo "== $D"
   PARGS="-policy $POLICY"; [ $POLICY = gnn ] && { [ $mode = gnn-pin ] && PARGS="-policy gnn" || PARGS="-policy gnn -pin=false"; }
-  (cd $WD && exec sudo -n $M/build/mercury 8080 0 $(seq 1 60)) > $D/mercury.log 2>&1 &
-  sleep 1; MPID=$(pgrep -f "^$M/build/mercury 8080 0" | head -1)
+  (cd $WD && exec sudo -n $M/build/mercury 8080 $MERCURY_CPU $(pool_list)) > $D/mercury.log 2>&1 &
+  sleep 1; MPID=$(pgrep -f "^$M/build/mercury 8080 $MERCURY_CPU" | head -1)
   for i in $(seq 50); do curl -s -m 1 127.0.0.1:8080/ping >/dev/null && break; sleep 0.2; done
-  (cd $WD && exec taskset -c 61 $OP -mercury 127.0.0.1:8080 -cpu 2 -client mercury $PARGS -gen-out $D/loadgen.out $OPF autoscale) > $D/operate.out 2> $D/operate.err &
+  (cd $WD && exec taskset -c $OP_CPU $OP -mercury 127.0.0.1:8080 -cpu 2 -client mercury -gen-cpu $GEN_CPU $PARGS -gen-out $D/loadgen.out $OPF autoscale) > $D/operate.out 2> $D/operate.err &
   OPID=$!
   for i in $(seq 300); do [ -d /sys/fs/cgroup/mercury/${PFX}loadgen ] && break; sleep 1; done
-  taskset -c 62 python3 $HERE/ctrlog.py --prefix $PFX --cpus 1-60 --out $D/counters.jsonl & CLPID=$!
+  taskset -c $HELPER_CPU python3 $HERE/ctrlog.py --prefix $PFX --cpus $POOL --out $D/counters.jsonl & CLPID=$!
   if [ $st = on ]; then
-    taskset -c 33-40 $SNG --cache 8 --taskset 33-40 --timeout 3600s --quiet &
-    taskset -c 41-47 $SNG --stream 7 --taskset 41-47 --timeout 3600s --quiet &
+    taskset -c $STRESS_CACHE_CPUS $SNG --cache $(ncpus $STRESS_CACHE_CPUS) --taskset $STRESS_CACHE_CPUS --timeout 3600s --quiet &
+    taskset -c $STRESS_STREAM_CPUS $SNG --stream $(ncpus $STRESS_STREAM_CPUS) --taskset $STRESS_STREAM_CPUS --timeout 3600s --quiet &
   fi
-  case $mode in gnn-pin) ;; *) sudo -n taskset -c 62 python3 $HERE/placer.py --mode $mode --prefix $PFX --log $D/placer.jsonl & PLPID=$!;; esac
+  case $mode in gnn-pin) ;; *) sudo -n taskset -c $HELPER_CPU python3 $HERE/placer.py --mode $mode --prefix $PFX --allowed $POOL --log $D/placer.jsonl & PLPID=$!;; esac
   wait $OPID; echo "  operator exit $? routes=$(grep -c ^route $D/operate.out)"; OPID=""
   stop_run
 done; done; done

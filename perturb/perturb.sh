@@ -13,7 +13,15 @@
 # and kills any stress-ng it started.
 set -u
 SYS=$1; OUT=$2; EXTRA=$3; shift 3
-B=/home/paul/Benchmarks; M=/home/paul/Mercury; HERE=$(cd "$(dirname "$0")" && pwd)
+# Host layout: defaults are dtn-01 (64 CPUs). hosts/$(hostname -s).env, or HOST_ENV=file, overrides them.
+HERE=$(cd "$(dirname "$0")" && pwd)
+HOST_ENV=${HOST_ENV:-$HERE/hosts/$(hostname -s).env}; [ -f "$HOST_ENV" ] && . "$HOST_ENV"
+B=${DSB_ROOT:-/home/paul/Benchmarks}; M=${MERCURY_ROOT:-/home/paul/Mercury}; export DSB_ROOT=$B
+MERCURY_CPU=${MERCURY_CPU:-0}; POOL=${POOL:-1-60}; GEN_CPU=${GEN_CPU:-60}
+OP_CPU=${OP_CPU:-61}; HELPER_CPU=${HELPER_CPU:-62}
+STRESS_CACHE_CPUS=${STRESS_CACHE_CPUS:-33-40}; STRESS_STREAM_CPUS=${STRESS_STREAM_CPUS:-41-47}
+pool_list() { python3 -c "import sys; sys.path.insert(0, '$HERE'); from common import parse_cpuset; print(' '.join(map(str, parse_cpuset('$POOL'))))"; }
+ncpus() { python3 -c "import sys; sys.path.insert(0, '$HERE'); from common import parse_cpuset; print(len(parse_cpuset('$1')))"; }
 case $SYS in
   hotel) WD=$B/deathstar-hotelReservations; OP=$WD/bin/loadgen; PFX=hotel-;;
   social) WD=$B/deathstar-socialNetwork; OP=$WD/goperate/bin/goperate; PFX=social-;;
@@ -38,14 +46,14 @@ cleanup() {
 }
 trap cleanup EXIT; trap 'exit 130' INT TERM HUP
 
-(cd $WD && exec sudo -n $M/build/mercury 8080 0 $(seq 1 60)) > $RUN/mercury.log 2>&1 &
-sleep 1; MPID=$(pgrep -f "^$M/build/mercury 8080 0" | head -1)
+(cd $WD && exec sudo -n $M/build/mercury 8080 $MERCURY_CPU $(pool_list)) > $RUN/mercury.log 2>&1 &
+sleep 1; MPID=$(pgrep -f "^$M/build/mercury 8080 $MERCURY_CPU" | head -1)
 [ -n "$MPID" ] || { echo "mercury did not start"; exit 1; }
-(cd $WD && exec taskset -c 61 $OP -mercury 127.0.0.1:8080 -cpu 2 -client mercury -policy saturate -gen-out $RUN/loadgen.out $EXTRA autoscale) > $RUN/operate.out 2> $RUN/operate.err &
+(cd $WD && exec taskset -c $OP_CPU $OP -mercury 127.0.0.1:8080 -cpu 2 -client mercury -gen-cpu $GEN_CPU -policy saturate -gen-out $RUN/loadgen.out $EXTRA autoscale) > $RUN/operate.out 2> $RUN/operate.err &
 OPID=$!
 for i in $(seq 120); do grep -q '^route ' $RUN/operate.out 2>/dev/null && break; sleep 1; done
-taskset -c 62 python3 $HERE/perturb.py --prefix $PFX --watch $RUN/operate.out --state $RUN/state.json \
-  --csv $(realpath -m $OUT)/perturb.csv --raw $(realpath -m $OUT)/perturb_windows.csv "$@" &
+taskset -c $HELPER_CPU python3 $HERE/perturb.py --prefix $PFX --watch $RUN/operate.out --state $RUN/state.json \
+  --allowed $POOL --mercury-cpu $MERCURY_CPU --csv $(realpath -m $OUT)/perturb.csv --raw $(realpath -m $OUT)/perturb_windows.csv "$@" &
 PPID_=$!; wait $PPID_; rc=$?; PPID_=""
 echo "perturb.py exit $rc; run dir $RUN"
 exit $rc
