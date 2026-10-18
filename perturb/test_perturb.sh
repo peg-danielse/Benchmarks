@@ -33,5 +33,5 @@ assert r["llc_mpki_after"] == "" and r["run_delay_ms_s_before"], r  # unsupporte
 w=list(csv.DictReader(open("labels/cw.csv"))); assert w[0]["instructions"] and w[0]["l3_miss"] and w[0]["df_ch4"] == "0", w[0]
 PY2
 echo "--- counters (real, must degrade on a fake cgroup)"; PERTURB_CG=$t/cg python3 $here/perturb.py --mercury http://127.0.0.1:18080 --daemon hotel-geo --kind remove --watch $t/op.out --clients 64 --timeout 20 --allowed 1-63 --counters cgroup --csv labels/d.csv --raw labels/dw.csv | grep -E "counters|wrote"
-grep -q "unavailable" labels/d.csv && echo DEGRADE-OK
+python3 -c "import csv; r=next(csv.DictReader(open('labels/d.csv'))); assert r['ipc_before']=='' and ('unavailable' in r['counters'] or 'missing' in r['counters']), r; print('status:', r['counters'][:160])" && echo DEGRADE-OK
 cat $t/calls; cat labels/perturb.csv | cut -d, -f6-26; test ! -e labels/perturb_state.json && grep -q '6,22' $t/cg/hotel-geo/cpuset.cpus && echo PASS

@@ -272,8 +272,8 @@ def main():
     ap.add_argument("--state", default="labels/perturb_state.json")
     ap.add_argument("--counters", default="off", choices=["off", "cgroup", "cpu"],
                     help="hardware counters + run-delay: per target cgroup, or system-wide on the target's CPUs")
-    ap.add_argument("--zen", default="auto", choices=["auto", "off"],
-                    help="AMD family 17h raw events: L2, stalls, L3 slice (amd_l3), DRAM (amd_df), SMT sibling")
+    ap.add_argument("--zen", default="auto", choices=["auto", "full", "off"],
+                    help="AMD family 17h raw events (full adds dispatch stalls, multiplexed): L2, stalls, L3 slice (amd_l3), DRAM (amd_df), SMT sibling")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
     a = ap.parse_args()
 

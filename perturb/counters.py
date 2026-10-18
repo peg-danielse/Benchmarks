@@ -50,9 +50,8 @@ def _open(etype, config, pid, cpu, flags):
     return fd
 
 
-def _read(fd):
-    v, en, run = struct.unpack("QQQ", os.read(fd, 24))
-    return v * en / run if run else 0.0
+def _raw(fd):
+    return struct.unpack("QQQ", os.read(fd, 24))  # value, time_enabled, time_running
 
 
 PMU = "/sys/bus/event_source/devices"
@@ -147,16 +146,23 @@ class Counters:
         except OSError as e:
             self.errors["all"] = str(e)
             return
-        for name, (t, c) in EVENTS.items():
-            self._add(name, [(t, c, pid, cpu, flags) for cpu in cpus])
+        self.last, self.total = {}, {}
         fam, core = cpu_family(), pmu_type("cpu")
+        self.zen = zen != "off" and fam == 0x17 and core is not None
+        # Zen 1 has 6 core counters: open 6 core events by default so nothing multiplexes.
+        # cache-misses = l2_miss and LLC is unmapped on Zen 1, so the generic ones are skipped there.
+        for name, (t, c) in EVENTS.items():
+            if self.zen and name in ("cache_misses", "llc_load_misses"):
+                continue
+            self._add(name, [(t, c, pid, cpu, flags) for cpu in cpus])
         if zen == "off":
             return
-        if fam != 0x17 or core is None:
+        if not self.zen:
             self.errors["zen1"] = f"cpu family {fam} is not 17h (Zen 1/2); raw events skipped"
             return
-        self.zen = True
         for name, c in ZEN1_CORE.items():
+            if name.startswith("disp_stall") and zen != "full":
+                continue
             self._add(name, [(core, c, pid, cpu, flags) for cpu in cpus])
         tc = sorted(set(target_cpus or cpus))
         l3, df = pmu_type("amd_l3"), pmu_type("amd_df")
@@ -198,7 +204,18 @@ class Counters:
             out = {k: (None if v is None else v * n) for k, v in f.items()}
             out.update({f"df_ch{i}": (0 if i == 4 else 1.5625e7 * n) for i in range(8)})  # 7 x 1 GB/window
             return out
-        return {name: (sum(_read(fd) for fd in self.fds[name]) if name in self.fds else None) for name in ALL_EVENTS}
+        # Monotonic multiplex-scaled totals: per fd, add dvalue * denabled / drunning since the last read.
+        for name, fds in self.fds.items():
+            for fd in fds:
+                v, en, run = _raw(fd)
+                v0, en0, run0 = self.last.get(fd, (0, 0, 0))
+                self.last[fd] = (v, en, run)
+                if run > run0:
+                    self.total[fd] = self.total.get(fd, 0.0) + (v - v0) * (en - en0) / (run - run0)
+        out = {name: (sum(self.total.get(fd, 0.0) for fd in self.fds[name]) if name in self.fds else None) for name in ALL_EVENTS}
+        if self.zen and out.get("cache_misses") is None:
+            out["cache_misses"] = out.get("l2_miss")
+        return out
 
     def status(self):
         if self.fake:
