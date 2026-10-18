@@ -97,3 +97,26 @@ daemon's own instructions and is only meaningful as a relative signal. Zen 1 has
 event; `sib_ghz` (busy GHz of the siblings) is the proxy. The generic LLC event is not mapped on
 Zen 1 (ENOENT), so `llc_mpki` stays empty. DF slot 4 reads 0 on dtn-01 and counts differ per die;
 treat `df_gbs` as a relative bandwidth proxy, not calibrated GB/s. Counts are scaled per read interval by time_enabled/time_running, so multiplexing cannot make deltas negative. Probe: `python3 counters.py <cpu> 0.3`.
+
+## Pinning A/B/C (`abc.sh`, `placer.py`, `ctrlog.py`, `pin_compare.py`)
+
+Question: Kurt's GNN autoscaler did better without pinning. Is that true of pinning in general, or only
+of static one-busy-thread-per-CPU pinning when there is no interference to react to?
+
+- `placer.py` side-car (sudo, no Mercury changes): `none` (full cpuset mask), `static` (busy threads
+  one per CPU, like `GnnController::pin()` without the model), `react-thread` (move a thread only when
+  wait share >= 0.2 for 3 ticks AND it is stacked / its SMT sibling is busy / its L3 slice is hot;
+  escalation same L3 -> node -> anywhere; hysteresis 0.2/0.05, 1 s cooldown, max 4 moves per 100 ms),
+  `react-cgroup` (swap a daemon CPU whose L3/sibling is hot for a free CPU in a cool slice via
+  `POST /cpus`, 10 s cooldown). Restores affinity and cpusets on exit. Log: placer.jsonl.
+- `ctrlog.py`: per-second IPC / stall fraction / L2 MPKI per daemon (by cpuset), L3 miss rate per
+  slice, DF GB/s per node.
+- `abc.sh hotel|social OUT [REPS]`: modes x stress {off,on} at `-users 2048` (past the knee), then
+  `pin_compare.py` summary. `POLICY=gnn` sizes with Kurt's GNN (`-pin=false`), and `MODES` may add
+  `gnn-pin` for his built-in pinning.
+- Tests: `test_placer.sh` (fake cgroups, /proc, sysfs, Mercury, affinity).
+
+    ./abc.sh hotel labels/abc 2
+    ./abc.sh social labels/abc 2
+    POLICY=gnn MODES="gnn-pin none static react-thread react-cgroup" ./abc.sh hotel labels/abc-gnn 2
+    python3 pin_compare.py ~/Mercury/data/dsb/social-pin/20261018-120642   # Kurt's run, read-only
