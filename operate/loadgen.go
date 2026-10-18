@@ -246,6 +246,9 @@ func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts
 		envMax:       strconv.Itoa(opts.genMax),
 		"GOMAXPROCS": strconv.Itoa(opts.genProcs),
 	}
+	if v := os.Getenv("DSB_ROOT"); v != "" {
+		env["DSB_ROOT"] = v // Mercury passes only explicit env: the loadgen needs the same root
+	}
 	gen := tuple{path: opts.bin, hostname: "localhost", id: loadgenID}
 	pid, err := start(base, gen, opts.homeCPU, env)
 	if err != nil {
