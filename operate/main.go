@@ -59,7 +59,15 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-const root = "/home/paul/Benchmarks"
+// root is the Benchmarks checkout; DSB_ROOT overrides it (e.g. /home/pager/Benchmarks on the PC).
+var root = envOr("DSB_ROOT", "/home/paul/Benchmarks")
+
+func envOr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
 
 func main() {
 	if os.Getenv(envRole) == roleGen {
