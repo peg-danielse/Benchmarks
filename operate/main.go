@@ -322,8 +322,11 @@ func ping(base string) error {
 // while the runtime starts, before it samples the one-core cpuset. Memcached
 // and mongod do not, so their wrappers turn these variables into -t and
 // WiredTiger's concurrent-transaction caps.
+// threadCapCores caps service threads (memcached -t, WiredTiger, GOMAXPROCS) independently of -svc-max (gnn-slo-v1 sweep).
+const threadCapCores = 16
+
 func daemonEnv(line tuple, coldCache bool) map[string]string {
-	limit := strconv.Itoa(autoMaxCores)
+	limit := strconv.Itoa(threadCapCores) // not -svc-max: fixed-allocation sweeps keep the same thread counts
 	switch {
 	case strings.Contains(line.path, "/memcached/"):
 		return map[string]string{"MEMCACHED_THREADS": limit}
