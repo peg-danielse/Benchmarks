@@ -122,20 +122,35 @@ What run-demo.sh does, in order:
 5. After `LOADGEN_CHECK_S` (30 s), checks that each loadgen's TCP peers are only its own instance's ports. Note that the hotel loadgen calls the services' gRPC ports directly, plus its own frontend.
 
 ## 5. What to watch
-Live view, in another terminal (the exact command is in `<run>/speculator.cmd`):
-```
-~/Benchmarks/demo/bin/speculator 28080 --watch 2 --status <run>/hotel-a/status --app hotel-a --status <run>/hotel-b/status --app hotel-b
-```
-It shows:
-- Mercury's group tree;
-- an `apps` section with daemons, distinct cores, core_sum and CPUs per instance;
-- a `demo` section per instance: target users, rate, worst-route p95 (and which route), weighted-mean p95, cores, errors, and Jaeger critical-path shares (`cp` lines, when JAEGER=1).
+run-demo.sh does **not** open speculator for you. Its only use of speculator is a background snapshot written to `<run>/speculator.log` every 10 s. That never touches your terminal; set `SPECULATOR_EVERY=0` to turn it off.
 
-The two sines are 180° apart. When hotel-a's users peak, hotel-b's bottom out, and the cores should follow.
+Open speculator yourself, in a second terminal, and add the instances by hand:
+```
+~/Benchmarks/demo/bin/speculator 28080
+```
+It refreshes every 2 s and shows Mercury's group tree. Then:
+1. Press **Enter**. The menu appears: `a) add app   r) remove app   q) quit   Enter) back`.
+2. Type **a** and Enter. It lists the daemon prefixes it found in Mercury, for example `1) hotel-a  2) hotel-b  3) hotel`.
+3. Type **1** (or `hotel-a`) and Enter.
+4. It suggests the status file of the newest run, e.g. `[.../runs/<run>/hotel-a/status]`. Press **Enter** to accept it, type another path, or type `-` for none (cores only, no users/latency).
+5. Repeat for hotel-b. Shortcut without the menu: type `a hotel-b` and Enter, then Enter for the suggested status file.
+6. To remove one: Enter, then `r`, then pick the number; or type `r hotel-b`. To quit: `q`.
+
+Once both are added, you see:
+- under `apps`: daemons, distinct cores, core_sum and CPUs per instance;
+- under `demo`: target users, rate, worst-route p95 (and which route), weighted-mean p95, cores, errors, and Jaeger critical-path shares (`cp` lines, when JAEGER=1).
+
+Daemons that belong to no added app are grouped by their first id segment (`hotel`).
+
+Non-interactive use:
+- Start with the apps already added: `speculator 28080 --app hotel-a=<run>/hotel-a/status --app hotel-b=<run>/hotel-b/status`.
+- `--once` prints one snapshot.
+- `--runs DIR` (or SPECULATOR_RUNS) changes where status files are suggested from; the default is ~/Benchmarks/demo/runs.
+
+The two sines are 180° apart. When hotel-a's users peak, hotel-b's bottom out, and with gnn you can watch the cores follow.
 
 Other outputs:
 - the run log prints one `demo app <inst> window ...` line per window;
-- `<run>/speculator.log` takes a snapshot every 10 s;
 - at the end you get `<run>/summary.txt`, `summary.json` and `demo.png` (users, rate, p95 and cores per instance over time).
 
 ## 6. Stop and clean up
