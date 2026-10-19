@@ -21,6 +21,7 @@ Kinds (target daemon d, partner p = busiest other daemon unless --partner):
   l3       replace d's last CPU with a CPU in p's L3 group that d does not use
   numa     move d's last CPU to an idle CPU on another NUMA node
   migrate  move d's whole cpuset to idle CPUs in another L3 group (same size)
+  socket   move d's whole cpuset to idle CPUs on the other socket (same size; cross-socket)
   stress   d's cpuset unchanged; during B, stress-ng workers run pinned (taskset)
            next to d: --stressor cpu|cache|stream|vm|matrix, --placement
            core (d's own CPUs) | smt (their siblings) | l3 (rest of d's L3) |
@@ -88,6 +89,10 @@ def l3(c):
     return parse_cpuset(rd(f"{SYS}/cpu{c}/cache/index3/shared_cpu_list"))
 
 
+def socket_of(c):
+    return int(rd(f"{SYS}/cpu{c}/topology/physical_package_id"))
+
+
 def node_of(c):
     for n in os.listdir("/sys/devices/system/node"):
         if n.startswith("node") and c in parse_cpuset(rd(f"/sys/devices/system/node/{n}/cpulist")):
@@ -133,6 +138,12 @@ def plan_perturbation(kind, d, partner, cpus, mercury_cpu, allowed):
             if g not in mine_l3 and len(free) >= len(mine):
                 return sorted(free[:len(mine)]), "", f"{format_cpuset(mine)}->{format_cpuset(free[:len(mine)])}"
         raise SystemExit("migrate: no other L3 group with enough idle CPUs")
+    if kind == "socket":
+        here = {socket_of(c) for c in mine}
+        far = [c for c in idle if socket_of(c) not in here]
+        if len(far) < len(mine):
+            raise SystemExit("socket: not enough idle CPUs on another socket")
+        return sorted(far[:len(mine)]), "", f"{format_cpuset(mine)}->{format_cpuset(far[:len(mine)])} (socket {sorted(here)}->{socket_of(far[0])})"
     raise SystemExit("unknown kind " + kind)
 
 
@@ -250,7 +261,7 @@ def main():
     ap.add_argument("--mercury", default="http://127.0.0.1:8080")
     ap.add_argument("--prefix", default="hotel-", help="daemon id prefix of the app (hotel- or social-)")
     ap.add_argument("--daemon", help="target daemon id, e.g. hotel-geo")
-    ap.add_argument("--kind", default="remove", choices=["remove", "smt", "l3", "numa", "migrate", "stress"])
+    ap.add_argument("--kind", default="remove", choices=["remove", "smt", "l3", "numa", "migrate", "socket", "stress"])
     ap.add_argument("--partner", help="partner daemon for smt/l3 (default: busiest other daemon)")
     ap.add_argument("--stressor", default="cpu", choices=["cpu", "cache", "stream", "vm", "matrix"])
     ap.add_argument("--placement", dest="stress_placement", default="smt", choices=["core", "smt", "l3", "numa"])
