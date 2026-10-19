@@ -7,7 +7,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-out, runs = sys.argv[1], [a.split("=", 1) for a in sys.argv[2:]]
+args = sys.argv[1:]
+title = None
+if args[:1] == ["--title"]:
+    title, args = args[1], args[2:]
+out, runs = args[0], [a.split("=", 1) for a in args[1:]]
 
 def load(run):
     apps = {}
@@ -110,7 +114,12 @@ for c, app in enumerate(insts):
     t.auto_set_font_size(False); t.set_fontsize(9); t.scale(1, 1.6)
 fig.text(0.5, 0.01, "corr(cores %s, cores %s) on a 5 s grid: " % tuple(insts[:2]) + ", ".join("%s %.3f" % kv for kv in cross.items())
          + "   (negative = Mercury shifts cores between the instances)", ha="center", fontsize=10) if cross else None
-fig.suptitle("Two hotels on one Mercury, 50-150 users sine (phase 0 / 180): " + " vs ".join(l for l, _ in runs))
+if title is None:  # sine range after the ramp-in (users below the minimum only occur while ramping)
+    ws_all = [w for d in data.values() for ws in d.values() for w in ws]
+    hi = max(w["users"] for w in ws_all)
+    lo = min(w["users"] for w in ws_all if w["t"] > 60)
+    title = "Two hotels on one Mercury, %d-%d users sine" % (lo, hi)
+fig.suptitle(title + ": " + " vs ".join(l for l, _ in runs))
 fig.tight_layout()
 fig.savefig(out, dpi=110)
 json.dump({"stats": stats, "cross_cores_corr": cross}, open(os.path.splitext(out)[0] + ".json", "w"), indent=2)
