@@ -241,6 +241,37 @@ func waitPort(addr string, timeout time.Duration) error {
 	return fmt.Errorf("timed out: %v", last)
 }
 
+// waitRedis sends PING until Redis answers +PONG (not -LOADING or another error) or timeout passes.
+func waitRedis(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	last := "no reply"
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = c.SetDeadline(time.Now().Add(time.Second))
+			buf := make([]byte, 256)
+			if _, err = c.Write([]byte("PING\r\n")); err == nil {
+				var n int
+				n, err = c.Read(buf)
+				reply := strings.TrimSpace(string(buf[:n]))
+				if err == nil && strings.HasPrefix(reply, "+PONG") {
+					c.Close()
+					return nil
+				}
+				if reply != "" {
+					last = reply
+				}
+			}
+			c.Close()
+		}
+		if err != nil {
+			last = err.Error()
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out after %s: %s", timeout, last)
+}
+
 func processAlive(pid int) bool {
 	_, err := os.Stat("/proc/" + strconv.Itoa(pid))
 	return err == nil

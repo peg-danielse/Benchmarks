@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// svcMinCores/svcMaxCores: per-service /scale min and max (-svc-min, -svc-max; default 1 and
+// autoMaxCores). min = max gives a fixed allocation (gnn-slo-v1 allocation sweep). Thread caps
+// (daemonEnv) stay at autoMaxCores so the services are the same in every sweep run.
+var svcMinCores, svcMaxCores = 1, autoMaxCores
+
 // root is the Benchmarks checkout; DSB_ROOT overrides it.
 var (
 	root   = envOr("DSB_ROOT", "/home/paul/Benchmarks")
@@ -120,14 +125,14 @@ func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers i
 		if saturateOnly[filepath.Base(line.path)] {
 			pol = "saturate" // -saturate-only: e.g. too many threads for gnn's per-tick read
 		}
-		if err := enableScale(base, line.id, pol, 1, autoMaxCores); err != nil {
+		if err := enableScale(base, line.id, pol, svcMinCores, svcMaxCores); err != nil {
 			return err
 		}
 		fmt.Printf(" %s=%s", filepath.Base(line.path), spec)
 	}
 	fmt.Println()
-	fmt.Printf("policy %s placement %s tick_ms %d min 1 max %d users 1-%d routes %s mix %s graph %s\n",
-		servicePolicy, servicePlacement, serviceTickMs, autoMaxCores, maxUsers, opts.routes, orDefault(opts.mix, "equal"), opts.graph)
+	fmt.Printf("policy %s placement %s tick_ms %d min %d max %d users 1-%d routes %s mix %s graph %s\n",
+		servicePolicy, servicePlacement, serviceTickMs, svcMinCores, svcMaxCores, maxUsers, opts.routes, orDefault(opts.mix, "equal"), opts.graph)
 
 	if opts.mode == clientInproc {
 		w, err := loadGraph(opts.graph)

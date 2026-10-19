@@ -64,6 +64,8 @@ func main() {
 	window := flag.Int("window-ms", 1000, "autoscale measurement window in ms (4 windows per user step)")
 	policy := flag.String("policy", "saturate", "autoscale policy for the service daemons: saturate or gnn (the load generator stays on saturate)")
 	tickMs := flag.Int("tick-ms", 10, "gnn decision tick in ms (sent with -policy gnn)")
+	svcMin := flag.Int("svc-min", 1, "autoscale: per-service min cores (min = max: fixed allocation)")
+	svcMax := flag.Int("svc-max", autoMaxCores, "autoscale: per-service max cores")
 	placement := flag.String("placement", "least_loaded", "core hand-out for /scale: least_loaded or nearest_first")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: goperate [flags] start|stop|init|autoscale\n\n")
@@ -113,6 +115,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	if *svcMin < 1 || *svcMax < *svcMin {
+		fmt.Fprintln(os.Stderr, "need 1 <= -svc-min <= -svc-max")
+		os.Exit(2)
+	}
+	svcMinCores, svcMaxCores = *svcMin, *svcMax
 	connsPerRoute = *conns
 	opts := clientOpts{
 		mode: *client, bin: *genBin, out: *genOut, config: *configPath, file: *file, graph: *graph,
@@ -209,6 +216,13 @@ func run(mercury string, cpu, users, initWorkers int, cmd string, opts clientOpt
 		if err := waitPort(addr, 90*time.Second); err != nil {
 			stopStarted()
 			return fmt.Errorf("%s did not listen on %s: %w", line.id, addr, err)
+		}
+		if filepath.Base(line.path) == "redis-server" {
+			// Redis listens while it still loads its dataset and answers -LOADING until done.
+			if err := waitRedis(addr, 120*time.Second); err != nil {
+				stopStarted()
+				return fmt.Errorf("%s not ready on %s: %w", line.id, addr, err)
+			}
 		}
 	}
 

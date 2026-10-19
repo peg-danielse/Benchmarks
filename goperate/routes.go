@@ -552,9 +552,13 @@ func measureRoutes(routes []liveRoute) []reading {
 
 func waitReady(rec *recorder, name string) error {
 	deadline := time.Now().Add(10 * time.Second)
+	hard := time.Now().Add(120 * time.Second) // a backend answering LOADING (Redis) extends the wait up to this
 	for time.Now().Before(deadline) {
 		if rec.snapshot().done > 0 {
 			return nil
+		}
+		if text, ok := rec.lastErr.Load().(string); ok && strings.Contains(text, "LOADING") && time.Now().Add(time.Second).After(deadline) && deadline.Before(hard) {
+			deadline = deadline.Add(time.Second)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
