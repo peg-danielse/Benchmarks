@@ -104,8 +104,8 @@ for k in "${!CLI[@]}"; do export "$k=${CLI[$k]}"; done
 : "${HOTEL_FILE:=$DSB_ROOT/mercury-hotel.txt}" "${DEMO_BIN:=$here/bin}" "${OUT:=$here/runs/$(date +%Y%m%d-%H%M%S)}"
 OUT=$(realpath -m "$OUT")   # operators run in the app trees: every path they get must be absolute
 export DSB_ROOT
-HOTEL_DIR=$DSB_ROOT/deathstar-hotelReservations
-SOCIAL_DIR=$DSB_ROOT/deathstar-socialNetwork
+# app trees: config files and the operators/Mercury cwd (dtn-01: the demo worktrees, not the shared checkouts)
+: "${HOTEL_DIR:=$DSB_ROOT/deathstar-hotelReservations}" "${SOCIAL_DIR:=$DSB_ROOT/deathstar-socialNetwork}"
 
 to_sec() {  # 300 | 300s | 5m | 1h | 1m30s
   python3 -c "import re,sys
