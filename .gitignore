@@ -1,5 +1,39 @@
-/*
-!/.gitignore
-!/perturb/
-/perturb/labels/
-/perturb/__pycache__/
+# Binaries / build outputs
+**/bin/
+**/target/
+**/node_modules/
+*.bundle
+**/__pycache__/
+*.pyc
+# Run outputs and data
+*.log
+**/rings/
+**/output/
+**/runs/
+perturb/labels/
+demo/lib/
+demo/opt/
+demo/state/
+# Upstream clones (see README)
+stress-ng/
+runtime/jaeger/src/
+# runtime: only hand-written wrapper sources and configs
+runtime/*
+!runtime/mongodb/
+!runtime/memcached/
+!runtime/rabbitmq/
+!runtime/redis/
+!runtime/jaeger/
+runtime/*/*
+!runtime/mongodb/mongod.c
+!runtime/memcached/memcached-server.c
+!runtime/rabbitmq/rabbitmq-server.c
+!runtime/redis/redis-server.c
+!runtime/jaeger/README.md
+!runtime/jaeger/run-jaeger.sh
+!runtime/jaeger/fake_mercury.py
+!runtime/jaeger/SHA256SUMS
+!runtime/jaeger/patches/
+!runtime/jaeger/config/
+# untracked junk in socialNetwork
+deathstar-socialNetwork/apparmor-data.h
