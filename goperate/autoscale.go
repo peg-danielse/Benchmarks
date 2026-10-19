@@ -7,8 +7,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// svcMinCores/svcMaxCores: per-service /scale min and max (-svc-min, -svc-max; default 1 and
+// autoMaxCores). min = max gives a fixed allocation (gnn-slo-v1 allocation sweep). Thread caps
+// (daemonEnv) stay at autoMaxCores so the services are the same in every sweep run.
+var svcMinCores, svcMaxCores = 1, autoMaxCores
 
 const (
 	root   = "/home/paul/Benchmarks"
@@ -105,14 +111,19 @@ func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers i
 		if err := setCpus(base, line.id, spec); err != nil {
 			return err
 		}
-		if err := enableSaturate(base, line.id, 1, autoMaxCores); err != nil {
+		pol := servicePolicy
+		if saturateOnly[filepath.Base(line.path)] {
+			pol = "saturate" // -saturate-only: e.g. too many threads for gnn's per-tick read
+		}
+		mn, mx := svcRange(line, svcMinCores, svcMaxCores)
+		if err := enableScale(base, line.id, pol, mn, mx); err != nil {
 			return err
 		}
 		fmt.Printf(" %s=%s", filepath.Base(line.path), spec)
 	}
 	fmt.Println()
-	fmt.Printf("policy saturate min 1 max %d users 1-%d routes %s mix %s graph %s\n",
-		autoMaxCores, maxUsers, opts.routes, orDefault(opts.mix, "equal"), opts.graph)
+	fmt.Printf("policy %s placement %s tick_ms %d min %d max %d users 1-%d routes %s mix %s graph %s\n",
+		servicePolicy, servicePlacement, serviceTickMs, svcMinCores, svcMaxCores, maxUsers, opts.routes, orDefault(opts.mix, "equal"), opts.graph)
 
 	if opts.mode == clientInproc {
 		w, err := loadGraph(opts.graph)
@@ -137,7 +148,7 @@ func orDefault(s, d string) string {
 
 // driveRoutes ramps every route together and prints one line per route per
 // window, in the hotel autoscaleN.out format: route, clients (this route's
-// active users), arrival_rate, service_rate, avg_us, p95_us, errors, cpus,
+// active users), arrival_rate, service_rate, avg_us, p95_us, p99_us, errors, cpus,
 // then the gen_* columns.
 func driveRoutes(cfg serviceConfig, names []string, maxUsers int, wl *workload, w io.Writer, lines []tuple, gen *genMeter) error {
 	routes, err := openRoutes(cfg, names, maxUsers, wl)
@@ -156,11 +167,37 @@ func driveRoutes(cfg serviceConfig, names []string, maxUsers int, wl *workload, 
 			cpus := cpuSetList(lines, readCPUSet)
 			for i, route := range routes {
 				reading := readings[i]
-				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f errors %d cpus %s %s\n",
+				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s\n",
 					route.name, routeUsers(clients, route.weight), reading.arrivalRate, reading.serviceRate,
-					reading.avgUs, reading.p95Us, reading.errors, cpus, gw)
+					reading.avgUs, reading.p95Us, reading.p99Us, reading.errors, cpus, gw)
 			}
 		}
 	}
 	return nil
+}
+
+// svcFixed (-svc-fixed "geo=1,mongod=2"): per-program fixed allocation (/scale min = max), keyed by the
+// deployment line's program name (memcached port, mongod, service name). Others use -svc-min/-svc-max.
+var svcFixed = map[string]int{}
+
+func parseSvcFixed(s string) error {
+	for _, kv := range strings.Split(s, ",") {
+		if kv == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		n, err := strconv.Atoi(v)
+		if !ok || err != nil || n < 1 {
+			return fmt.Errorf("-svc-fixed: bad entry %q (want name=cores)", kv)
+		}
+		svcFixed[k] = n
+	}
+	return nil
+}
+
+func svcRange(line tuple, mn, mx int) (int, int) {
+	if k, ok := svcFixed[filepath.Base(line.path)]; ok {
+		return k, k
+	}
+	return mn, mx
 }

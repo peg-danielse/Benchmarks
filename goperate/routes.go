@@ -532,13 +532,16 @@ func stopRoutes(routes []liveRoute) {
 	}
 }
 
+// windowMs is the autoscale measurement window (-window-ms, LOADGEN_WINDOW_MS); default 1 s.
+var windowMs = 1000
+
 func measureRoutes(routes []liveRoute) []reading {
 	befores := make([]snap, len(routes))
 	for i, route := range routes {
 		befores[i] = route.rec.snapshot()
 	}
 	began := time.Now()
-	time.Sleep(scaleMeasure)
+	time.Sleep(time.Duration(windowMs) * time.Millisecond)
 	elapsed := time.Since(began)
 	out := make([]reading, len(routes))
 	for i, route := range routes {
@@ -549,9 +552,13 @@ func measureRoutes(routes []liveRoute) []reading {
 
 func waitReady(rec *recorder, name string) error {
 	deadline := time.Now().Add(10 * time.Second)
+	hard := time.Now().Add(120 * time.Second) // a backend answering LOADING (Redis) extends the wait up to this
 	for time.Now().Before(deadline) {
 		if rec.snapshot().done > 0 {
 			return nil
+		}
+		if text, ok := rec.lastErr.Load().(string); ok && strings.Contains(text, "LOADING") && time.Now().Add(time.Second).After(deadline) && deadline.Before(hard) {
+			deadline = deadline.Add(time.Second)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
