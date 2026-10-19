@@ -59,7 +59,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// root is the Benchmarks checkout; DSB_ROOT overrides it (e.g. /home/pager/Benchmarks on the PC).
+// root is the Benchmarks checkout; DSB_ROOT overrides it (e.g. /home/pager/Documents/Benchmarks on the PC).
 var root = envOr("DSB_ROOT", "/home/paul/Benchmarks")
 
 func envOr(k, d string) string {
