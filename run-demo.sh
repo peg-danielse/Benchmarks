@@ -462,10 +462,10 @@ fi
 # ---- live: per-window summaries here; speculator snapshots to a log ----
 SPEC=$DEMO_BIN/speculator
 st=(); for inst in $INSTS; do st+=(--status "$OUT/$inst/status" --app "$inst"); done
-echo "live view in another terminal:  $SPEC $MERCURY_PORT --watch 2 ${st[*]}"
+echo "live view (yours, another terminal): $SPEC $MERCURY_PORT  then Enter, a, pick each instance (see DEMO.md 5)"
 printf '%q ' "$SPEC" "$MERCURY_PORT" --watch 2 "${st[@]}" > "$OUT/speculator.cmd"; echo >> "$OUT/speculator.cmd"
 if [ -x "$SPEC" ] && [ "$SPECULATOR_EVERY" -gt 0 ]; then
-  ( while sleep "$SPECULATOR_EVERY"; do echo "=== $(date +%T)"; "$SPEC" "$MERCURY_PORT" "${st[@]}" 2>&1 | sed -n '/^apps/,$p'; done ) > "$OUT/speculator.log" 2>&1 &
+  ( while sleep "$SPECULATOR_EVERY"; do echo "=== $(date +%T)"; "$SPEC" "$MERCURY_PORT" --once "${st[@]}" 2>&1 < /dev/null | sed -n '/^apps/,$p'; done ) > "$OUT/speculator.log" 2>&1 &
   SPECPID=$!
 fi
 tail -n0 -F "${OUT}"/*/operate.out 2>/dev/null | grep --line-buffered -E '^demo app|^traces |loadgen error' &
