@@ -1,0 +1,7 @@
+#!/bin/sh
+# Mercury keeps its own working directory. The services open
+# config/jaeger-config.yml and config/service-config.json relative to this tree.
+root=/home/pager/Documents/Benchmarks/deathstar-socialNetwork
+name=$(basename "$0")
+cd "$root" || exit 1
+exec "$root/bin/$name" "$@"
