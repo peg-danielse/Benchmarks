@@ -35,5 +35,4 @@ runtime/*/*
 !runtime/jaeger/SHA256SUMS
 !runtime/jaeger/patches/
 !runtime/jaeger/config/
-# untracked junk in socialNetwork
-deathstar-socialNetwork/apparmor-data.h
+!train-ticket/ts-ticket-office-service/bin/
