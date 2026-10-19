@@ -95,7 +95,12 @@ func main() {
 	tickMs := flag.Int("tick-ms", 10, "gnn decision tick in ms (sent with -policy gnn)")
 	svcFixedFlag := flag.String("svc-fixed", "", "autoscale: per-program fixed cores, e.g. geo=1,mongod=2 (min = max for those daemons)")
 	placement := flag.String("placement", "least_loaded", "core hand-out for /scale: least_loaded or nearest_first")
+	tracing = addJaegerFlags(root) // -jaeger*, -trace-*: see jaegercp.go and jaeger_app.go
 	flag.Parse()
+	if err := tracing.validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	cmd := "test"
 	if flag.NArg() > 0 {
 		cmd = flag.Arg(0)
@@ -129,6 +134,12 @@ func main() {
 		os.Exit(2)
 	}
 	connsPerRoute = *conns
+	if tracing.enabled() {
+		if *client == clientMercury && *genOut == "" {
+			*genOut = defaultGenOut()
+		}
+		tracing.out = tracing.csvPath(*genOut, hotelOutputDir())
+	}
 	opts := clientOpts{
 		mode: *client, bin: *genBin, out: *genOut, config: *configPath, homeCPU: *genCPU,
 		genMin: *genMin, genMax: *genMax, genProcs: *genProcs, conns: *conns,
@@ -161,6 +172,9 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 
 	switch cmd {
 	case "stop":
+		if tracing.enabled() && tracing.mode == jaegerModeMercury {
+			_ = kill(base, "hotel-jaeger")
+		}
 		return stopAll(base, lines)
 	case "start", "test", "scale", "autoscale":
 		if cpu < 1 {
@@ -176,6 +190,7 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 	var (
 		startedMu sync.Mutex
 		started   []tuple
+		jaeger    *jaegerProc
 	)
 	track := func(t tuple) {
 		startedMu.Lock()
@@ -190,6 +205,8 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 				fmt.Fprintf(os.Stderr, "kill %s: %v\n", started[i].id, err)
 			}
 		}
+		started = nil
+		jaeger.stop()
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -198,6 +215,16 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 		stopStarted()
 		os.Exit(1)
 	}()
+
+	if tracing.enabled() {
+		if cmd == "start" && tracing.mode == jaegerModeBare {
+			fmt.Fprintln(os.Stderr, "warning: -jaeger-mode bare Jaeger stops when operate exits; use mercury or external with start")
+		}
+		if jaeger, err = startJaeger(tracing, base, cpu, "hotel", jaegerLogPath(), track); err != nil {
+			stopStarted()
+			return err
+		}
+	}
 
 	for _, line := range lines {
 		addr, err := listenAddr(line, cfg)
@@ -210,6 +237,7 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 			return fmt.Errorf("%s: %w", line.id, err)
 		}
 		env := daemonEnv(line, coldCache)
+		addTraceEnv(line, env)
 		pid, err := start(base, line, cpu, env)
 		if err != nil {
 			stopStarted()

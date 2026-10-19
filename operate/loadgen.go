@@ -109,6 +109,7 @@ func loadgenMain(w io.Writer) error {
 	if id == "" {
 		id = loadgenID
 	}
+	traceMarks = os.Getenv(envTraceMarks) == "1"
 	gen := &genMeter{
 		cpus: func() string { return readCPUSet(id) },
 		busy: func() (time.Duration, bool) { return cgroupBusy(id) },
@@ -226,14 +227,13 @@ func selfBusy() (time.Duration, bool) {
 
 // runMercuryLoadgen starts bin/loadgen under Mercury, gives it a home CPU and
 // the saturate policy, and copies its output to stdout until it finishes.
-func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts, track func(tuple)) error {
+func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts, track func(tuple), w io.Writer) error {
 	if st, err := os.Stat(opts.bin); err != nil || st.Mode()&0o111 == 0 {
 		return fmt.Errorf("loadgen binary %s is missing or not executable (go build -o bin/loadgen ./operate)", opts.bin)
 	}
 	out := opts.out
 	if out == "" {
-		out = filepath.Join(root, "deathstar-hotelReservations", "output",
-			fmt.Sprintf("loadgen-%d.out", time.Now().Unix()))
+		out = defaultGenOut()
 	}
 	env := map[string]string{
 		envRole:      roleGen,
@@ -245,6 +245,9 @@ func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts
 		envWindow:    strconv.Itoa(windowMs),
 		envMax:       strconv.Itoa(opts.genMax),
 		"GOMAXPROCS": strconv.Itoa(opts.genProcs),
+	}
+	if tracing.enabled() {
+		env[envTraceMarks] = "1"
 	}
 	gen := tuple{path: opts.bin, hostname: "localhost", id: loadgenID}
 	pid, err := start(base, gen, opts.homeCPU, env)
@@ -260,7 +263,12 @@ func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts
 		return err
 	}
 	fmt.Printf("policy loadgen saturate min %d max %d home %d out %s\n", opts.genMin, opts.genMax, opts.homeCPU, out)
-	return tailLoadgen(out, func() bool { return processAlive(pid) }, os.Stdout, 100*time.Millisecond)
+	return tailLoadgen(out, func() bool { return processAlive(pid) }, w, 100*time.Millisecond)
+}
+
+func defaultGenOut() string {
+	return filepath.Join(root, "deathstar-hotelReservations", "output",
+		fmt.Sprintf("loadgen-%d.out", time.Now().Unix()))
 }
 
 func processAlive(pid int) bool {
