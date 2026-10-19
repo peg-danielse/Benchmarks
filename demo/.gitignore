@@ -5,3 +5,4 @@ lib/
 *.bundle
 opt/
 __pycache__/
+build-logs/

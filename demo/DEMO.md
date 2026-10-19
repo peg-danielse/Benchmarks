@@ -16,7 +16,7 @@ Two modes:
 - Hotel and social checkouts on branch `demo` (sine load, `-prefix`, `-ready-file`).
 - Passwordless `sudo -n` for Mercury (cgroups), `ss -p` and the cgroup cleanup. Go, g++, python3 with matplotlib, and curl.
 - Social on the PC also needs the extra libraries and servers set in `hosts/Apollo.env`: `SOCIAL_LIB_DIR`, `SOCIAL_REDIS_BIN`, `SOCIAL_RABBITMQ_SERVER` and `SOCIAL_ERLANG_BIN`. Social currently does not run on the PC (see Troubleshooting).
-- Do not use port 8080 or ports 18180-18199 (Kurt's runs). On dtn-01, make sure Kurt's sweep has finished before you start.
+- Do not use port 8080 or ports 18180-18199 (Kurt's runs). On dtn-01, make sure Kurt's sweep and tests have finished before you start, and use the demo worktrees (section 8).
 
 ## 2. Build
 ```
@@ -44,7 +44,7 @@ For each instance, a value is looked up as `<INST>_<KEY>` (for example `HOTEL_B_
 | `--hotel-phase` / `--social-phase` | HOTEL_PHASE / SOCIAL_PHASE | 0 / 180 |
 | `--set KEY=VAL` | any variable | for example `--set HOTEL_B_USERS_MAX=200` |
 | `--policy` / `--model` | POLICY / GNN_MODEL | saturate |
-| `--jaeger` / `--no-jaeger` | JAEGER | Apollo 1, dtn-01 0 |
+| `--jaeger` / `--no-jaeger` | JAEGER | Apollo 1, dtn-01 1 |
 | `--fake` | FAKE | 0 (1 = fake_mercury.py, no root needed) |
 | `--out` | OUT | runs/<timestamp> |
 | `--dry-run` | | prints settings, the port map and commands; starts nothing |
@@ -84,7 +84,7 @@ Hotel has no consul/registry: every address comes from that instance's `config.j
 In hotel + social mode:
 - hotel keeps its stock ports.
 - social uses 10001-10012, memcached 11311-11313, redis 6379, rabbitmq 5672, and its own mongod on 27018.
-- Jaeger offsets are 20000 for hotel and 21000 for social.
+- Jaeger offsets are 20000 for hotel and 21000 for social (dtn-01: 21000 / 22000, hotel ports +1000 and social mongod 27028; see section 8).
 
 For every hotel instance, run-demo.sh generates `<run>/<inst>/` containing:
 - `config.json` with the shifted ports;
@@ -175,3 +175,61 @@ pgrep -af 'mercury|operate|jaeger|mongod|memcached'; ls /sys/fs/cgroup/mercury |
   - rabbitmq 4.3.1 fails on OTP 29, so use generic-unix 4.1.4 with OTP 28.1 from `demo/opt`.
   - Open issue: SocialGraphService throws std::bad_alloc in `sw::redis::ConnectionPool::ConnectionPool` (redis++ ABI mismatch with the Debian-built binary). Social is not usable on the PC yet; use the two-hotel mode there.
 - **gnn**: `--policy gnn --model PATH`. Not tested in the demo.
+
+## 8. dtn-01
+dtn-01 is shared with Kurt. Never build or run in his checkouts (`~/Benchmarks/deathstar-*`, `~/Mercury`): they hold his uncommitted work.
+The demo uses its own trees:
+
+| what | path | branch |
+|---|---|---|
+| demo scripts (this repo) | `~/Benchmarks/demo` | `demo` |
+| hotel operator source | `~/Benchmarks/demo-wt/hotel` (worktree of `~/Benchmarks/deathstar-hotelReservations`) | `demo` |
+| social operator source | `~/Benchmarks/demo-wt/social` (worktree of `~/Benchmarks/deathstar-socialNetwork`) | `demo` |
+| Mercury source + build | `~/Benchmarks/demo-wt/mercury`, build in `build-demo/` (worktree of `~/Mercury`) | `demo` |
+| demo binaries | `~/Benchmarks/demo/bin/{operate,goperate,speculator}` | |
+
+Read-only from the shared tree (`DSB_ROOT=~/Benchmarks`): the stock hotel service binaries (`deathstar-hotelReservations/bin`), the social binaries (`deathstar-socialNetwork/bin` and `run/` wrappers), the `runtime/` wrappers, `mercury-hotel.txt`, `mercury-social.txt` and `jaeger/run-jaeger.sh`.
+`HOTEL_DIR` and `SOCIAL_DIR` (set in `hosts/dtn-01.env`) point at the worktrees. They provide config.json / service-config.json and serve as the cwd of Mercury and the operators.
+The hotel mongod stores its data in `runtime/mongodb/28017` (hotel, hotel-a) and `runtime/mongodb/29017` (hotel-b); the social mongod uses `runtime/mongodb/27028`. That keeps the demo away from Kurt's 27017/27018 data.
+
+Before you start, check that the host is free. Nothing in the output below should be Kurt's (ctest, `*_it.sh`, mercury on 18180, operate/goperate, jaeger, stress-ng, perturb/sweep):
+```
+pgrep -af 'mercury|operate|jaeger|stress-ng|perturb|sweep|spinner|ctest|loadgen' | grep -v cursor-agent
+ss -Hltn | awk '{print $4}' | grep -E ':(5000|6379|5672|8080|1818[0-9]|2701[78]|10001)$'
+```
+
+Build (niced, pinned away from CPUs 0-11/32-43, where Kurt's tests run):
+```
+W=~/Benchmarks/demo-wt
+cd ~/Benchmarks/demo && nice -n 19 taskset -c 50-57 env HOTEL_SRC=$W/hotel SOCIAL_SRC=$W/social MERCURY_SRC=$W/mercury ./build.sh
+cd $W/mercury && cmake -S . -B build-demo -DCMAKE_BUILD_TYPE=Release && nice -n 19 taskset -c 50-57 cmake --build build-demo -j 8
+```
+
+Layout (`hosts/dtn-01.env`; EPYC 7301, NUMA node n = CPUs 4n..4n+3 plus 32+4n..32+4n+3):
+
+| | hotel + social | hotel,hotel |
+|---|---|---|
+| Mercury | CPU 0, port 28080, pool 1-59 | same |
+| homes | hotel 1-15 (nodes 0-3), social 16-31 (nodes 4-7; 18 daemons round-robin) | hotel-a 1-15, hotel-b 16-30 |
+| loadgen homes | 58 / 59 | 58 / 59 |
+| operators | 60 / 61 | 60 / 61 |
+| Jaeger (JAEGER=1 by default) | both on 62, offsets 21000 / 22000 | both on 62, offsets 21000 / 22000 |
+| hotel port offset | 1000 (frontend 6000, 9081-9089, 12211-12214, mongod 28017) | hotel-a 1000, hotel-b 2000 (frontend 7000, 10081-10089, 13211-13214, mongod 29017) |
+
+The Jaeger offset 20000 and Mercury ports 8080 and 18180-18199 are Kurt's. CPU 63 stays free.
+Social's own ports are fixed: 10001-10012, memcached 11311-11313, redis 6379 and rabbitmq 5672. Kurt's social deployment uses the same ones, so never run social next to it (the port check refuses).
+The first social run loads the graph into mongod :27028 (marker `state/social-mongo-27028.loaded`).
+
+Run:
+```
+cd ~/Benchmarks/demo
+./run-demo.sh --dry-run                                   # settings, port map, commands
+./run-demo.sh                                             # hotel + social, 2 x 10 min, saturate, Jaeger on
+./run-demo.sh --apps hotel,hotel                          # two hotels
+./run-demo.sh --apps hotel,hotel --policy gnn             # gnn (model: demo-wt/mercury/models/gnn_v3.json)
+# smoke test (~2 min, low users):
+./run-demo.sh --apps "hotel social" --duration 90s --period 60s --ramp-in 10s --users-min 2 --users-max 4 --out runs/smoke-hs
+./run-demo.sh --apps hotel,hotel    --duration 90s --period 60s --ramp-in 10s --users-min 2 --users-max 4 --out runs/smoke-hh
+~/Benchmarks/demo/bin/speculator 28080                    # live view, second terminal (section 5)
+```
+After a run, check that nothing is left behind (section 6). Also check the demo ports: `ss -Hltn | grep -E ':(28080|6000|7000|2[78]017|29017|27028|2[5-8][0-9]{3}|3[4-8][0-9]{3})\b'`.
