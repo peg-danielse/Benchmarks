@@ -81,6 +81,9 @@ func daemonHomes(n int) ([]int, error) {
 	if n < 1 {
 		return nil, fmt.Errorf("no daemons")
 	}
+	if demoLoad.homes != "" {
+		return listHomes(demoLoad.homes, n) // -homes: demo splits the pool between apps
+	}
 	homes := make([]int, n)
 	for i := range homes {
 		cpu := homeFirstLinux + i
@@ -96,6 +99,7 @@ func daemonHomes(n int) ([]int, error) {
 // saturate 1..16, and drives the social-network routes together from 1 user
 // to maxUsers and back down.
 func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers int, opts clientOpts, track func(tuple)) error {
+	maxUsers = demoLoad.workers(maxUsers)
 	homes, err := daemonHomes(len(lines))
 	if err != nil {
 		return err
@@ -135,6 +139,12 @@ func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers i
 	fmt.Printf("policy %s placement %s tick_ms %d min %d max %d users 1-%d routes %s mix %s graph %s\n",
 		servicePolicy, servicePlacement, serviceTickMs, svcMinCores, svcMaxCores, maxUsers, opts.routes, orDefault(opts.mix, "equal"), opts.graph)
 
+	fmt.Println(demoLoad.describe())
+	closeWindows, err := startWindowLog(opts.out, socialOutputDir())
+	if err != nil {
+		return err
+	}
+	defer closeWindows()
 	out, finishTraces, err := beginTraceAnalysis()
 	if err != nil {
 		return err
@@ -173,11 +183,17 @@ func driveRoutes(cfg serviceConfig, names []string, maxUsers int, wl *workload, 
 		return err
 	}
 	var marks markCounter
-	for level, clients := range rampClients(maxUsers) {
+	next := demoLoad.levels(maxUsers, windowMs, time.Now) // -load ramp or sine (demoload.go)
+	for {
+		lv, ok := next()
+		if !ok {
+			break
+		}
+		level, clients := lv.level, lv.clients
 		for _, route := range routes {
 			route.rec.setActive(int32(routeUsers(clients, route.weight)))
 		}
-		for window := 0; window < autoWindows; window++ {
+		for window := 0; window < lv.windows; window++ {
 			g0 := gen.begin()
 			t0 := time.Now()
 			readings := measureRoutes(routes)
@@ -187,9 +203,9 @@ func driveRoutes(cfg serviceConfig, names []string, maxUsers int, wl *workload, 
 			marks.emit(w, level, window, clients, t0, t1) // -jaeger only: window marker for the trace analyser
 			for i, route := range routes {
 				reading := readings[i]
-				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s\n",
+				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s%s\n",
 					route.name, routeUsers(clients, route.weight), reading.arrivalRate, reading.serviceRate,
-					reading.avgUs, reading.p95Us, reading.p99Us, reading.errors, cpus, gw)
+					reading.avgUs, reading.p95Us, reading.p99Us, reading.errors, cpus, gw, lv.suffix())
 			}
 		}
 	}

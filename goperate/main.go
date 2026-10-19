@@ -68,6 +68,8 @@ func main() {
 	svcMax := flag.Int("svc-max", autoMaxCores, "autoscale: per-service max cores")
 	svcFixedFlag := flag.String("svc-fixed", "", "autoscale: per-program fixed cores, e.g. geo=1,mongod=2 (min = max for those daemons)")
 	placement := flag.String("placement", "least_loaded", "core hand-out for /scale: least_loaded or nearest_first")
+	addLoadFlags("social") // -load sine, -users-min/-max, -period, -phase, -step, -duration, -ramp-in, -homes: demoload.go
+	runDir := flag.String("run-dir", "", "working directory for the C++ services (config/ written there; default <gen-out dir>/social-cwd when -jaeger is on or -config is not the repo's)")
 	tracing = addJaegerFlags(root) // -jaeger*, -trace-*: see jaegercp.go and jaeger_app.go
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: goperate [flags] start|stop|init|autoscale\n\n")
@@ -91,6 +93,13 @@ func main() {
 		os.Exit(2)
 	}
 	windowMs = *window
+	if err := demoLoad.validate(windowMs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if demoLoad.sine() && *client == clientMercury && *genOut == "" {
+		*genOut = defaultGenOut() // the windows CSV sits next to it
+	}
 	servicePin = *pin
 	for _, n := range strings.Split(*satOnly, ",") {
 		if n != "" {
@@ -136,6 +145,19 @@ func main() {
 			*genOut = defaultGenOut()
 		}
 		tracing.out = tracing.csvPath(*genOut, socialOutputDir())
+	}
+	if *runDir != "" {
+		socialCwd = *runDir
+	} else if *configPath != snRoot+"/config/service-config.json" && cmd != "stop" {
+		// The services read config/service-config.json from their cwd: a moved -config (demo: MongoDB on 27018) needs a run dir.
+		if *client == clientMercury && *genOut == "" {
+			*genOut = defaultGenOut()
+		}
+		base := *genOut
+		if base == "" {
+			base = filepath.Join(socialOutputDir(), "x")
+		}
+		socialCwd = filepath.Join(filepath.Dir(base), "social-cwd")
 	}
 	opts := clientOpts{
 		mode: *client, bin: *genBin, out: *genOut, config: *configPath, file: *file, graph: *graph,
@@ -205,6 +227,12 @@ func run(mercury string, cpu, users, initWorkers int, cmd string, opts clientOpt
 		os.Exit(1)
 	}()
 
+	if !tracing.enabled() && socialCwd != "" {
+		if err := prepareSocialRunDir(socialRunDir(), opts.config); err != nil {
+			return err
+		}
+		fmt.Printf("social cwd %s (config/service-config.json -> %s)\n", socialRunDir(), opts.config)
+	}
 	if tracing.enabled() {
 		if cmd == "start" && tracing.mode == jaegerModeBare {
 			fmt.Fprintln(os.Stderr, "warning: -jaeger-mode bare Jaeger stops when goperate exits; use mercury or external with start")

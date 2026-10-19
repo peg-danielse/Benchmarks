@@ -90,6 +90,9 @@ func listenAddr(line tuple, cfg serviceConfig) (string, error) {
 	}
 	switch base {
 	case "mongod":
+		if addr, err := cfg.address("social-graph-mongodb"); err == nil {
+			return addr, nil // -config may move MongoDB (demo: 27018 next to hotel's 27017)
+		}
 		return "127.0.0.1:27017", nil
 	case "redis-server":
 		return "127.0.0.1:6379", nil
@@ -339,7 +342,7 @@ func enableScale(base, id, policy string, minCores, maxCores int) error {
 	return nil
 }
 func readCPUSet(id string) string {
-	data, err := os.ReadFile("/sys/fs/cgroup/mercury/" + id + "/cpuset.cpus")
+	data, err := os.ReadFile(cgroupFile(id, "cpuset.cpus"))
 	if err != nil {
 		return "?"
 	}

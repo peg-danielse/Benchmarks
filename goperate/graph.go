@@ -90,7 +90,11 @@ func parallel(workers, n int, addr, verb string, fn func(context.Context, *tconn
 				fail(err)
 				return
 			}
-			defer func() { c.trans.Close() }()
+			defer func() {
+				if c != nil { // nil after a failed re-dial
+					c.trans.Close()
+				}
+			}()
 			for ctx.Err() == nil {
 				i := int(next.Add(1) - 1)
 				if i >= n {

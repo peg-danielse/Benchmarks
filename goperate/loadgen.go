@@ -127,6 +127,11 @@ func loadgenMain(w io.Writer) error {
 		id = loadgenID
 	}
 	traceMarks = os.Getenv(envTraceMarks) == "1"
+	if v := os.Getenv(envLoad); v != "" {
+		if err := demoLoad.decode(v); err != nil {
+			return err
+		}
+	}
 	gen := &genMeter{
 		cpus: func() string { return readCPUSet(id) },
 		busy: func() (time.Duration, bool) { return cgroupBusy(id) },
@@ -208,7 +213,7 @@ func countCPUs(spec string) int {
 
 // cgroupBusy is usage_usec from the daemon's cgroup cpu.stat.
 func cgroupBusy(id string) (time.Duration, bool) {
-	data, err := os.ReadFile("/sys/fs/cgroup/mercury/" + id + "/cpu.stat")
+	data, err := os.ReadFile(cgroupFile(id, "cpu.stat"))
 	if err != nil {
 		return 0, false
 	}
@@ -272,6 +277,12 @@ func runMercuryLoadgen(base string, maxUsers int, opts clientOpts, track func(tu
 	}
 	if tracing.enabled() {
 		env[envTraceMarks] = "1"
+	}
+	if demoLoad.sine() {
+		env[envLoad] = demoLoad.encode()
+	}
+	if v := os.Getenv(envCgroupRoot); v != "" {
+		env[envCgroupRoot] = v
 	}
 	if v := os.Getenv("DSB_ROOT"); v != "" {
 		env["DSB_ROOT"] = v // Mercury passes only explicit env: the loadgen needs the same root

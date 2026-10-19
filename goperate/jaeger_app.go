@@ -100,7 +100,15 @@ sampler:
 `, time.Now().Format(time.RFC3339), reporter, o.sampleString())
 }
 
-func socialRunDir() string { return filepath.Join(filepath.Dir(tracing.out), "social-cwd") }
+// socialCwd is -run-dir (or the default goperate picks for a moved -config); empty: next to traces.csv.
+var socialCwd string
+
+func socialRunDir() string {
+	if socialCwd != "" {
+		return socialCwd
+	}
+	return filepath.Join(filepath.Dir(tracing.out), "social-cwd")
+}
 
 // prepareSocialRunDir writes <dir>/config/jaeger-config.yml and links
 // <dir>/config/service-config.json to serviceConfig.
@@ -109,7 +117,14 @@ func prepareSocialRunDir(dir, serviceConfig string) error {
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(cfgDir, "jaeger-config.yml"), []byte(socialJaegerYAML(tracing)), 0o644); err != nil {
+	yaml := []byte(socialJaegerYAML(tracing))
+	if !tracing.enabled() {
+		var err error
+		if yaml, err = os.ReadFile(filepath.Join(snRoot, "config", "jaeger-config.yml")); err != nil {
+			return err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "jaeger-config.yml"), yaml, 0o644); err != nil {
 		return err
 	}
 	abs, err := filepath.Abs(serviceConfig)
@@ -123,7 +138,7 @@ func prepareSocialRunDir(dir, serviceConfig string) error {
 
 // addTraceEnv points the C++ service wrappers at the per-run config directory.
 func addTraceEnv(line tuple, env map[string]string) map[string]string {
-	if !tracing.enabled() || !strings.HasSuffix(filepath.Base(line.path), "Service") {
+	if !(tracing.enabled() || socialCwd != "") || !strings.HasSuffix(filepath.Base(line.path), "Service") {
 		return env
 	}
 	if env == nil {
@@ -147,9 +162,9 @@ func jaegerLogPath() string {
 // finish function (see hotel operate/jaeger_app.go).
 func beginTraceAnalysis() (io.Writer, func(), error) {
 	if !tracing.enabled() {
-		return os.Stdout, func() {}, nil
+		return appOut, func() {}, nil
 	}
-	out := lockedWriter{mu: &sync.Mutex{}, w: os.Stdout}
+	out := lockedWriter{mu: &sync.Mutex{}, w: appOut}
 	var cpOut io.Writer
 	if tracing.cpLines {
 		cpOut = out
