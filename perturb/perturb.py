@@ -136,7 +136,7 @@ def plan_perturbation(kind, d, partner, cpus, mercury_cpu, allowed):
     raise SystemExit("unknown kind " + kind)
 
 
-STRESS_NG = os.environ.get("STRESS_NG", os.path.expanduser("~/Benchmarks/stress-ng/stress-ng"))
+STRESS_NG = os.environ.get("STRESS_NG", os.path.expanduser("~/Documents/Benchmarks/stress-ng/stress-ng"))
 INTENSITY = {"low": (lambda n: 1, 50), "mid": (lambda n: max(1, n // 2), 80), "high": (lambda n: n, 100)}
 
 
