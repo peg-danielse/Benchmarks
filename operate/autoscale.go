@@ -103,7 +103,8 @@ func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int
 		if err := setCpus(base, line.id, spec); err != nil {
 			return err
 		}
-		if err := enableScale(base, line.id, servicePolicy, svcMinCores, autoMaxCores); err != nil {
+		mn, mx := svcRange(line, svcMinCores, autoMaxCores)
+		if err := enableScale(base, line.id, servicePolicy, mn, mx); err != nil {
 			return err
 		}
 		fmt.Printf(" %s=%s", filepath.Base(line.path), spec)
@@ -312,4 +313,30 @@ func cpuSetList(lines []tuple, spec func(string) string) string {
 		b.WriteString(spec(line.id))
 	}
 	return b.String()
+}
+
+// svcFixed (-svc-fixed "geo=1,mongod=2"): per-program fixed allocation (/scale min = max), keyed by the
+// deployment line's program name (memcached port, mongod, service name). Others use -svc-min/-svc-max.
+var svcFixed = map[string]int{}
+
+func parseSvcFixed(s string) error {
+	for _, kv := range strings.Split(s, ",") {
+		if kv == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		n, err := strconv.Atoi(v)
+		if !ok || err != nil || n < 1 {
+			return fmt.Errorf("-svc-fixed: bad entry %q (want name=cores)", kv)
+		}
+		svcFixed[k] = n
+	}
+	return nil
+}
+
+func svcRange(line tuple, mn, mx int) (int, int) {
+	if k, ok := svcFixed[filepath.Base(line.path)]; ok {
+		return k, k
+	}
+	return mn, mx
 }

@@ -101,6 +101,7 @@ func main() {
 	window := flag.Int("window-ms", 1000, "autoscale measurement window in ms (4 windows per user step)")
 	policy := flag.String("policy", "saturate", "autoscale policy for the service daemons: saturate or gnn (the load generator stays on saturate)")
 	tickMs := flag.Int("tick-ms", 10, "gnn decision tick in ms (sent with -policy gnn)")
+	svcFixedFlag := flag.String("svc-fixed", "", "autoscale: per-program fixed cores, e.g. geo=1,mongod=2 (min = max for those daemons)")
 	placement := flag.String("placement", "least_loaded", "core hand-out for /scale: least_loaded or nearest_first")
 	tracing = addJaegerFlags(root) // -jaeger*, -trace-*: see jaegercp.go and jaeger_app.go
 	flag.Parse()
@@ -136,6 +137,10 @@ func main() {
 	servicePin = *pin
 	svcMinCores, autoMaxCores = *svcMin, *svcMax
 	servicePolicy, serviceTickMs, servicePlacement = *policy, *tickMs, *placement
+	if err := parseSvcFixed(*svcFixedFlag); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	connsPerRoute = *conns
 	if tracing.enabled() {
 		if *client == clientMercury && *genOut == "" {
