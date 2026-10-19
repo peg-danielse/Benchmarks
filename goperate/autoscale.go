@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -125,6 +124,11 @@ func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers i
 	fmt.Printf("policy %s placement %s tick_ms %d min %d max %d users 1-%d routes %s mix %s graph %s\n",
 		servicePolicy, servicePlacement, serviceTickMs, svcMinCores, svcMaxCores, maxUsers, opts.routes, orDefault(opts.mix, "equal"), opts.graph)
 
+	out, finishTraces, err := beginTraceAnalysis()
+	if err != nil {
+		return err
+	}
+	defer finishTraces()
 	if opts.mode == clientInproc {
 		w, err := loadGraph(opts.graph)
 		if err != nil {
@@ -133,10 +137,11 @@ func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers i
 		if w.mix, err = parseMix(opts.mix, names); err != nil {
 			return err
 		}
+		traceMarks = tracing.enabled()
 		gen := &genMeter{cpus: inprocCPUs, busy: selfBusy, max: len(clientCPUs())}
-		return driveRoutes(cfg, names, maxUsers, w, os.Stdout, lines, gen)
+		return driveRoutes(cfg, names, maxUsers, w, out, lines, gen)
 	}
-	return runMercuryLoadgen(base, maxUsers, opts, track)
+	return runMercuryLoadgen(base, maxUsers, opts, track, out)
 }
 
 func orDefault(s, d string) string {
@@ -156,15 +161,19 @@ func driveRoutes(cfg serviceConfig, names []string, maxUsers int, wl *workload, 
 	if err != nil {
 		return err
 	}
-	for _, clients := range rampClients(maxUsers) {
+	var marks markCounter
+	for level, clients := range rampClients(maxUsers) {
 		for _, route := range routes {
 			route.rec.setActive(int32(routeUsers(clients, route.weight)))
 		}
 		for window := 0; window < autoWindows; window++ {
 			g0 := gen.begin()
+			t0 := time.Now()
 			readings := measureRoutes(routes)
+			t1 := time.Now()
 			gw := gen.end(g0)
 			cpus := cpuSetList(lines, readCPUSet)
+			marks.emit(w, level, window, clients, t0, t1) // -jaeger only: window marker for the trace analyser
 			for i, route := range routes {
 				reading := readings[i]
 				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s\n",
