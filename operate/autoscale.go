@@ -73,7 +73,6 @@ type clientOpts struct {
 const (
 	clientMercury = "mercury"
 	clientInproc  = "inproc"
-	loadgenID     = "hotel-loadgen"
 
 	defaultGenCPU   = 60
 	defaultGenMin   = 2
@@ -82,6 +81,7 @@ const (
 )
 
 func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int, opts clientOpts, track func(tuple)) error {
+	maxUsers = demoLoad.workers(maxUsers)
 	homes, err := daemonHomes(len(lines))
 	if err != nil {
 		return err
@@ -117,6 +117,12 @@ func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int
 			return fmt.Errorf("deployment has no %s", name)
 		}
 	}
+	fmt.Println(demoLoad.describe())
+	closeWindows, err := startWindowLog(opts.out, hotelOutputDir())
+	if err != nil {
+		return err
+	}
+	defer closeWindows()
 	w, finishTraces, err := beginTraceAnalysis()
 	if err != nil {
 		return err
@@ -141,11 +147,17 @@ func driveRoutes(cfg boot.Config, maxUsers int, w io.Writer, lines []tuple, gen 
 	}
 
 	var marks markCounter
-	for level, clients := range rampClients(maxUsers) {
+	next := demoLoad.levels(maxUsers, windowMs, time.Now) // -load ramp or sine (demoload.go)
+	for {
+		lv, ok := next()
+		if !ok {
+			break
+		}
+		level, clients := lv.level, lv.clients
 		for _, route := range routes {
 			route.rec.setActive(int32(clients))
 		}
-		for window := 0; window < autoWindows; window++ {
+		for window := 0; window < lv.windows; window++ {
 			g0 := gen.begin()
 			t0 := time.Now()
 			readings := measureRoutes(routes)
@@ -155,9 +167,9 @@ func driveRoutes(cfg boot.Config, maxUsers int, w io.Writer, lines []tuple, gen 
 			marks.emit(w, level, window, clients, t0, t1) // -jaeger only: window marker for the trace analyser
 			for i, route := range routes {
 				reading := readings[i]
-				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s\n",
+				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s%s\n",
 					route.name, clients, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.p99Us, reading.errors,
-					cpus, gw)
+					cpus, gw, lv.suffix())
 			}
 		}
 	}
@@ -226,6 +238,9 @@ func daemonHomes(n int) ([]int, error) {
 	if n < 1 {
 		return nil, fmt.Errorf("no daemons")
 	}
+	if demoLoad.homes != "" {
+		return listHomes(demoLoad.homes, n) // -homes: demo splits the pool between apps
+	}
 	homes := make([]int, n)
 	for i := range homes {
 		cpu := homeFirstLinux + i
@@ -291,7 +306,7 @@ func enableScale(base, id, policy string, minCores, maxCores int) error {
 }
 
 func readCPUSet(id string) string {
-	data, err := os.ReadFile("/sys/fs/cgroup/mercury/" + id + "/cpuset.cpus")
+	data, err := os.ReadFile(cgroupFile(id, "cpuset.cpus"))
 	if err != nil {
 		return "?"
 	}
@@ -340,3 +355,10 @@ func svcRange(line tuple, mn, mx int) (int, int) {
 	}
 	return mn, mx
 }
+
+// idPrefix names this instance's Mercury daemons (<prefix>-geo, <prefix>-loadgen,
+// <prefix>-jaeger); -prefix sets it so two hotels can share one Mercury.
+var (
+	idPrefix  = "hotel"
+	loadgenID = "hotel-loadgen"
+)

@@ -77,6 +77,9 @@ func main() {
 		}
 		return
 	}
+	prefix := flag.String("prefix", "hotel", "daemon id prefix (<prefix>-geo, <prefix>-loadgen, ...); give each hotel sharing a Mercury its own")
+	flag.StringVar(&readyFile, "ready-file", "", "autoscale: after every daemon listens, write this file and wait for -go-file before any load (run-demo.sh port checks)")
+	flag.StringVar(&goFile, "go-file", "", "with -ready-file: the file to wait for (default <ready-file>.go)")
 	mercury := flag.String("mercury", "127.0.0.1:8080", "Mercury host:port")
 	cpu := flag.Int("cpu", 0, "daemon CPU number Mercury was given (not the CPU Mercury pinned itself to)")
 	users := flag.Int("users", 1024, "maximum concurrent users on each autoscale route")
@@ -103,8 +106,11 @@ func main() {
 	tickMs := flag.Int("tick-ms", 10, "gnn decision tick in ms (sent with -policy gnn)")
 	svcFixedFlag := flag.String("svc-fixed", "", "autoscale: per-program fixed cores, e.g. geo=1,mongod=2 (min = max for those daemons)")
 	placement := flag.String("placement", "least_loaded", "core hand-out for /scale: least_loaded or nearest_first")
+	addLoadFlags("hotel")          // -load sine, -users-min/-max, -period, -phase, -step, -duration, -ramp-in, -homes: demoload.go
 	tracing = addJaegerFlags(root) // -jaeger*, -trace-*: see jaegercp.go and jaeger_app.go
 	flag.Parse()
+	idPrefix, loadgenID = *prefix, *prefix+"-loadgen"
+	demoLoad.app = *prefix
 	if err := tracing.validate(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -134,6 +140,13 @@ func main() {
 		os.Exit(2)
 	}
 	windowMs = *window
+	if err := demoLoad.validate(windowMs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if demoLoad.sine() && *client == clientMercury && *genOut == "" {
+		*genOut = defaultGenOut() // the windows CSV sits next to it
+	}
 	servicePin = *pin
 	svcMinCores, autoMaxCores = *svcMin, *svcMax
 	servicePolicy, serviceTickMs, servicePlacement = *policy, *tickMs, *placement
@@ -173,6 +186,11 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 	if err != nil {
 		return err
 	}
+	for svc, addr := range cfg.Memcached { // trace attribution follows this instance's memcached ports
+		if _, port, err := net.SplitHostPort(addr); err == nil {
+			hotelMemcached[svc] = port
+		}
+	}
 	base := mercuryURL(mercury)
 	if err := ping(base); err != nil {
 		return err
@@ -181,7 +199,7 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 	switch cmd {
 	case "stop":
 		if tracing.enabled() && tracing.mode == jaegerModeMercury {
-			_ = kill(base, "hotel-jaeger")
+			_ = kill(base, idPrefix+"-jaeger")
 		}
 		return stopAll(base, lines)
 	case "start", "test", "scale", "autoscale":
@@ -228,7 +246,7 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 		if cmd == "start" && tracing.mode == jaegerModeBare {
 			fmt.Fprintln(os.Stderr, "warning: -jaeger-mode bare Jaeger stops when operate exits; use mercury or external with start")
 		}
-		if jaeger, err = startJaeger(tracing, base, cpu, "hotel", jaegerLogPath(), track); err != nil {
+		if jaeger, err = startJaeger(tracing, base, cpu, idPrefix, jaegerLogPath(), track); err != nil {
 			stopStarted()
 			return err
 		}
@@ -265,6 +283,12 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 		}
 	}
 
+	if cmd == "autoscale" && readyFile != "" {
+		if err := waitGo(readyFile, goFile); err != nil {
+			stopStarted()
+			return err
+		}
+	}
 	if cmd == "start" {
 		fmt.Printf("left %d daemons running\n", len(started))
 		return nil
@@ -297,7 +321,7 @@ func parseFile(path string) ([]tuple, error) {
 		if len(fields) != 2 {
 			return nil, fmt.Errorf("%s:%d: want exec_path and hostname", path, n+1)
 		}
-		id := "hotel-" + filepath.Base(fields[0])
+		id := idPrefix + "-" + filepath.Base(fields[0])
 		if seen[id] {
 			return nil, fmt.Errorf("duplicate daemon id %s", id)
 		}
@@ -496,4 +520,24 @@ func dropHotelDatabases(mongoAddr string) error {
 		}
 	}
 	return nil
+}
+
+var readyFile, goFile string
+
+// waitGo writes ready and blocks until the go file exists (30 min at most), so a
+// caller can check ports and entry points with every daemon up but no load yet.
+func waitGo(ready, goPath string) error {
+	if goPath == "" {
+		goPath = ready + ".go"
+	}
+	if err := os.WriteFile(ready, []byte(fmt.Sprintf("%s ready %d\n", idPrefix, time.Now().UnixMilli())), 0644); err != nil {
+		return err
+	}
+	fmt.Printf("%s: daemons up, waiting for %s\n", idPrefix, goPath)
+	for deadline := time.Now().Add(30 * time.Minute); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		if _, err := os.Stat(goPath); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s never appeared", goPath)
 }

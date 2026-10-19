@@ -12,7 +12,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -85,9 +84,9 @@ func jaegerLogPath() string {
 // analyser appends traces.csv rows (and cp lines) asynchronously.
 func beginTraceAnalysis() (io.Writer, func(), error) {
 	if !tracing.enabled() {
-		return os.Stdout, func() {}, nil
+		return appOut, func() {}, nil
 	}
-	out := lockedWriter{mu: &sync.Mutex{}, w: os.Stdout}
+	out := lockedWriter{mu: &sync.Mutex{}, w: appOut}
 	var cpOut io.Writer
 	if tracing.cpLines {
 		cpOut = out
