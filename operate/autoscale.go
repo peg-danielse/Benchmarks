@@ -116,11 +116,17 @@ func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int
 			return fmt.Errorf("deployment has no %s", name)
 		}
 	}
-	if opts.mode == clientInproc {
-		gen := &genMeter{cpus: inprocCPUs, busy: selfBusy, max: len(clientCPUs())}
-		return driveRoutes(cfg, maxUsers, os.Stdout, lines, gen)
+	w, finishTraces, err := beginTraceAnalysis()
+	if err != nil {
+		return err
 	}
-	return runMercuryLoadgen(base, lines, maxUsers, opts, track)
+	defer finishTraces()
+	if opts.mode == clientInproc {
+		traceMarks = tracing.enabled()
+		gen := &genMeter{cpus: inprocCPUs, busy: selfBusy, max: len(clientCPUs())}
+		return driveRoutes(cfg, maxUsers, w, lines, gen)
+	}
+	return runMercuryLoadgen(base, lines, maxUsers, opts, track, w)
 }
 
 // driveRoutes ramps every hotel route together and prints one line per route
@@ -133,15 +139,19 @@ func driveRoutes(cfg boot.Config, maxUsers int, w io.Writer, lines []tuple, gen 
 		return err
 	}
 
-	for _, clients := range rampClients(maxUsers) {
+	var marks markCounter
+	for level, clients := range rampClients(maxUsers) {
 		for _, route := range routes {
 			route.rec.setActive(int32(clients))
 		}
 		for window := 0; window < autoWindows; window++ {
 			g0 := gen.begin()
+			t0 := time.Now()
 			readings := measureRoutes(routes)
+			t1 := time.Now()
 			gw := gen.end(g0)
 			cpus := cpuSetList(lines, readCPUSet)
+			marks.emit(w, level, window, clients, t0, t1) // -jaeger only: window marker for the trace analyser
 			for i, route := range routes {
 				reading := readings[i]
 				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s\n",
