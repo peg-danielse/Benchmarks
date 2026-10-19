@@ -29,7 +29,8 @@ case $SYS in
 esac
 
 others() {  # benchmark processes: binaries under $B or $M, stress-ng, or our driver scripts (not text that merely mentions them)
-  ps -eo pid=,comm=,args= | awk -v B="$B/" -v M="$M/" -v self=$$ '$1 != self && (index($3, B) == 1 || index($3, M) == 1 || $2 == "stress-ng" || $2 == "mercury" ||
+  local anc=" " p=$$; while [ "${p:-0}" -gt 1 ]; do anc="$anc$p "; p=$(ps -o ppid= -p $p | tr -d ' '); done  # our own driver chain (e.g. sweep.sh) is not "others"
+  ps -eo pid=,comm=,args= | awk -v B="$B/" -v M="$M/" -v anc="$anc" 'index(anc, " " $1 " ") == 0 && (index($3, B) == 1 || index($3, M) == 1 || $2 == "stress-ng" || $2 == "mercury" ||
     ($3 ~ /(^|\/)(bash|sh|python3?)$/ && $4 ~ /(dsb_ab|perturb|abc|sweep)\.sh$|(perturb|placer)\.py$/ && $4 !~ /abc\.sh$|perturb\.sh$/))'
 }
 busy=$(others)
