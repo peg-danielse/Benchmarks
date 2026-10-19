@@ -10,7 +10,7 @@ package main
 // What it does when -jaeger is on:
 //
 //  1. startJaeger runs the Jaeger v2 all-in-one (run-jaeger.sh from
-//     ~/Benchmarks/jaeger) as a bare helper process pinned with taskset
+//     ~/Benchmarks/jaeger; ~/Documents/Benchmarks/jaeger on the PC) as a bare helper process pinned with taskset
 //     (-jaeger-mode bare), as a Mercury daemon moved onto -jaeger-cpus with
 //     POST /cpus (-jaeger-mode mercury), or uses one that is already running
 //     (-jaeger-mode external).
