@@ -102,6 +102,7 @@ for k in "${!CLI[@]}"; do export "$k=${CLI[$k]}"; done
 : "${SOCIAL_MONGO:=own}" "${SOCIAL_MONGO_PORT:=27018}" "${SOCIAL_INIT:=auto}" "${SOCIAL_LIB_DIR:=}" "${SOCIAL_REDIS_BIN:=}" "${SOCIAL_RABBITMQ_SERVER:=}" "${SOCIAL_ERLANG_BIN:=}"
 : "${SPECULATOR_EVERY:=10}" "${LOADGEN_CHECK_S:=30}"
 : "${HOTEL_FILE:=$DSB_ROOT/mercury-hotel.txt}" "${DEMO_BIN:=$here/bin}" "${OUT:=$here/runs/$(date +%Y%m%d-%H%M%S)}"
+OUT=$(realpath -m "$OUT")   # operators run in the app trees: every path they get must be absolute
 export DSB_ROOT
 HOTEL_DIR=$DSB_ROOT/deathstar-hotelReservations
 SOCIAL_DIR=$DSB_ROOT/deathstar-socialNetwork
@@ -418,7 +419,7 @@ started_by() {  # port inst -> listener's process descends from inst's operator 
 if has_kind hotel; then
   for inst in $INSTS; do [ ${KIND[$inst]} = hotel ] || continue
     for i in $(seq 900); do [ -f "$OUT/$inst/ready" ] && break
-      kill -0 ${OPIDS##* } 2>/dev/null || true; sleep 0.2; done
+      kill -0 "${OPID[$inst]}" 2>/dev/null || die "$inst operator exited before its daemons were up: $(tail -n 2 "$OUT/$inst/operate.err")"; sleep 0.2; done
     [ -f "$OUT/$inst/ready" ] || die "$inst never got its daemons up: see $OUT/$inst/operate.err"
   done
   {

@@ -24,6 +24,7 @@ def load(run):
             w["p95"] = max(w["p95"], float(r["p95_us"]) / 1000); w["p95w"] += float(r["p95_us"]) / 1000 * rate
             w["avgw"] += float(r["avg_us"]) / 1000 * rate; w["err"] += int(r["errors"])
             w["cores"], w["csum"] = int(r["app_cores"]), int(r["core_sum"])
+            w["clients"] = min(w.get("clients", 10**9), int(r["clients"]))
         ws = [wins[k] for k in sorted(wins)]
         for w in ws:
             w["p95w"] = w["p95w"] / w["rate"] if w["rate"] else 0
@@ -35,6 +36,18 @@ def load(run):
             nxt = ws[i + 1]["ms"] if i + 1 < len(ws) else None
             w["dt"] = (nxt - w["ms"]) / 1000 if nxt else 1.0
     return apps
+
+def corr(a, b):
+    if len(a) < 3 or statistics.pstdev(a) == 0 or statistics.pstdev(b) == 0:
+        return float("nan")
+    ma, mb = statistics.fmean(a), statistics.fmean(b)
+    return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (len(a) * statistics.pstdev(a) * statistics.pstdev(b))
+
+def grid(ws, key, step=5.0):  # mean of key per 5 s bucket since load start
+    b = {}
+    for w in ws:
+        b.setdefault(int(w["t"] // step), []).append(w[key])
+    return {k: statistics.fmean(v) for k, v in b.items()}
 
 def smooth(v, n=5):
     return [statistics.fmean(v[max(0, i - n + 1):i + 1]) for i in range(len(v))]
@@ -56,7 +69,15 @@ for label, apps in data.items():
                           cores_mean=round(statistics.fmean(w["cores"] for w in ws), 2),
                           core_sum_mean=round(statistics.fmean(w["csum"] for w in ws), 2),
                           core_seconds=round(sum(w["cores"] * w["dt"] for w in ws)),
-                          errors=sum(w["err"] for w in ws)))
+                          errors=sum(w["err"] for w in ws),
+                          corr_users_cores=round(corr([w["users"] for w in ws], [w["cores"] for w in ws]), 3),
+                          short_clients=sum(1 for w in ws if w.get("clients", w["users"]) < w["users"])))
+cross = {}
+for label, apps in data.items():
+    if len(insts) == 2 and all(a in apps for a in insts):
+        ga, gb = grid(apps[insts[0]], "cores"), grid(apps[insts[1]], "cores")
+        keys = sorted(set(ga) & set(gb))
+        cross[label] = round(corr([ga[k] for k in keys], [gb[k] for k in keys]), 3)
 colors = {}
 palette = ["tab:blue", "tab:red", "tab:green", "tab:purple"]
 for i, (label, _) in enumerate(runs):
@@ -82,19 +103,24 @@ for c, app in enumerate(insts):
             ax.set_xlabel("seconds since load start")
     tab = axes[len(rows)][c]
     tab.axis("off")
-    cols = ["run", "lat mean ms", "p95 wmean ms", "p95 worst med", "cores mean", "core-s", "rate mean", "errors"]
+    cols = ["run", "lat mean ms", "p95 wmean ms", "p95 worst med", "cores mean", "core-s", "rate mean", "errors", "corr users~cores"]
     cell = [[s["run"], s["lat_mean_ms"], s["p95_wmean_ms"], s["p95_worst_median_ms"], s["cores_mean"], s["core_seconds"],
-             s["rate_mean"], s["errors"]] for s in stats if s["app"] == app]
+             s["rate_mean"], s["errors"], s["corr_users_cores"]] for s in stats if s["app"] == app]
     t = tab.table(cellText=cell, colLabels=cols, loc="center")
     t.auto_set_font_size(False); t.set_fontsize(9); t.scale(1, 1.6)
+fig.text(0.5, 0.01, "corr(cores %s, cores %s) on a 5 s grid: " % tuple(insts[:2]) + ", ".join("%s %.3f" % kv for kv in cross.items())
+         + "   (negative = Mercury shifts cores between the instances)", ha="center", fontsize=10) if cross else None
 fig.suptitle("Two hotels on one Mercury, 50-150 users sine (phase 0 / 180): " + " vs ".join(l for l, _ in runs))
 fig.tight_layout()
 fig.savefig(out, dpi=110)
-json.dump(stats, open(os.path.splitext(out)[0] + ".json", "w"), indent=2)
+json.dump({"stats": stats, "cross_cores_corr": cross}, open(os.path.splitext(out)[0] + ".json", "w"), indent=2)
 w = max(len(s["run"]) for s in stats)
-lines = ["%-8s %-*s %8s %9s %9s %9s %8s %8s %9s %6s" % ("app", w, "run", "lat_ms", "p95w_ms", "p95worst", "cores", "csum", "core_s", "rate", "errors")]
+lines = ["%-8s %-*s %8s %9s %9s %9s %8s %8s %9s %6s %9s %6s" % ("app", w, "run", "lat_ms", "p95w_ms", "p95worst", "cores", "csum", "core_s", "rate", "errors", "corr_u~c", "short")]
 for s in stats:
-    lines.append("%-8s %-*s %8.2f %9.2f %9.2f %9.2f %8.2f %8d %9d %6d" % (s["app"], w, s["run"], s["lat_mean_ms"], s["p95_wmean_ms"],
-                 s["p95_worst_median_ms"], s["cores_mean"], s["core_sum_mean"], s["core_seconds"], s["rate_mean"], s["errors"]))
+    lines.append("%-8s %-*s %8.2f %9.2f %9.2f %9.2f %8.2f %8d %9d %6d %9.3f %6d" % (s["app"], w, s["run"], s["lat_mean_ms"], s["p95_wmean_ms"],
+                 s["p95_worst_median_ms"], s["cores_mean"], s["core_sum_mean"], s["core_seconds"], s["rate_mean"], s["errors"],
+                 s["corr_users_cores"], s["short_clients"]))
+for k, v in cross.items():
+    lines.append("cross-instance corr(cores %s, cores %s) %s: %.3f" % (insts[0], insts[1], k, v))
 open(os.path.splitext(out)[0] + ".txt", "w").write("\n".join(lines) + "\n")
 print("\n".join(lines)); print("plot", out)
