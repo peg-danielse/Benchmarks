@@ -67,11 +67,16 @@ func main() {
 	svcMin := flag.Int("svc-min", 1, "autoscale: per-service min cores (min = max: fixed allocation)")
 	svcMax := flag.Int("svc-max", autoMaxCores, "autoscale: per-service max cores")
 	placement := flag.String("placement", "least_loaded", "core hand-out for /scale: least_loaded or nearest_first")
+	tracing = addJaegerFlags(root) // -jaeger*, -trace-*: see jaegercp.go and jaeger_app.go
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: goperate [flags] start|stop|init|autoscale\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	if err := tracing.validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	if flag.NArg() != 1 {
 		flag.Usage()
 		os.Exit(2)
@@ -121,6 +126,12 @@ func main() {
 	}
 	svcMinCores, svcMaxCores = *svcMin, *svcMax
 	connsPerRoute = *conns
+	if tracing.enabled() {
+		if *client == clientMercury && *genOut == "" {
+			*genOut = defaultGenOut()
+		}
+		tracing.out = tracing.csvPath(*genOut, socialOutputDir())
+	}
 	opts := clientOpts{
 		mode: *client, bin: *genBin, out: *genOut, config: *configPath, file: *file, graph: *graph,
 		routes: *routes, mix: *mix, homeCPU: *genCPU, genMin: *genMin, genMax: *genMax,
@@ -151,6 +162,9 @@ func run(mercury string, cpu, users, initWorkers int, cmd string, opts clientOpt
 		return err
 	}
 	if cmd == "stop" {
+		if tracing.enabled() && tracing.mode == jaegerModeMercury {
+			_ = kill(base, "social-jaeger")
+		}
 		return stopAll(base, lines)
 	}
 	if cpu < 1 {
@@ -160,6 +174,7 @@ func run(mercury string, cpu, users, initWorkers int, cmd string, opts clientOpt
 	var (
 		startedMu sync.Mutex
 		started   []tuple
+		jaeger    *jaegerProc
 	)
 	track := func(t tuple) {
 		startedMu.Lock()
@@ -175,6 +190,7 @@ func run(mercury string, cpu, users, initWorkers int, cmd string, opts clientOpt
 			}
 		}
 		started = nil
+		jaeger.stop()
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -183,6 +199,20 @@ func run(mercury string, cpu, users, initWorkers int, cmd string, opts clientOpt
 		stopStarted()
 		os.Exit(1)
 	}()
+
+	if tracing.enabled() {
+		if cmd == "start" && tracing.mode == jaegerModeBare {
+			fmt.Fprintln(os.Stderr, "warning: -jaeger-mode bare Jaeger stops when goperate exits; use mercury or external with start")
+		}
+		if err := prepareSocialRunDir(socialRunDir(), opts.config); err != nil {
+			return err
+		}
+		fmt.Printf("social cwd %s (config/jaeger-config.yml: probabilistic %s)\n", socialRunDir(), tracing.sampleString())
+		if jaeger, err = startJaeger(tracing, base, cpu, "social", jaegerLogPath(), track); err != nil {
+			stopStarted()
+			return err
+		}
+	}
 
 	for _, line := range lines {
 		addr, err := listenAddr(line, cfg)
@@ -196,7 +226,7 @@ func run(mercury string, cpu, users, initWorkers int, cmd string, opts clientOpt
 				return fmt.Errorf("%s: %w", line.id, err)
 			}
 		}
-		env := daemonEnv(line)
+		env := addTraceEnv(line, daemonEnv(line))
 		pid, err := start(base, line, cpu, env)
 		if err != nil {
 			stopStarted()
