@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -124,7 +125,8 @@ func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers i
 		if saturateOnly[filepath.Base(line.path)] {
 			pol = "saturate" // -saturate-only: e.g. too many threads for gnn's per-tick read
 		}
-		if err := enableScale(base, line.id, pol, svcMinCores, svcMaxCores); err != nil {
+		mn, mx := svcRange(line, svcMinCores, svcMaxCores)
+		if err := enableScale(base, line.id, pol, mn, mx); err != nil {
 			return err
 		}
 		fmt.Printf(" %s=%s", filepath.Base(line.path), spec)
@@ -192,4 +194,30 @@ func driveRoutes(cfg serviceConfig, names []string, maxUsers int, wl *workload, 
 		}
 	}
 	return nil
+}
+
+// svcFixed (-svc-fixed "geo=1,mongod=2"): per-program fixed allocation (/scale min = max), keyed by the
+// deployment line's program name (memcached port, mongod, service name). Others use -svc-min/-svc-max.
+var svcFixed = map[string]int{}
+
+func parseSvcFixed(s string) error {
+	for _, kv := range strings.Split(s, ",") {
+		if kv == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		n, err := strconv.Atoi(v)
+		if !ok || err != nil || n < 1 {
+			return fmt.Errorf("-svc-fixed: bad entry %q (want name=cores)", kv)
+		}
+		svcFixed[k] = n
+	}
+	return nil
+}
+
+func svcRange(line tuple, mn, mx int) (int, int) {
+	if k, ok := svcFixed[filepath.Base(line.path)]; ok {
+		return k, k
+	}
+	return mn, mx
 }
