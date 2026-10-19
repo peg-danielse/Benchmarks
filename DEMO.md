@@ -20,7 +20,7 @@ Two modes:
 
 ## 2. Build
 ```
-cd ~/Benchmarks/demo
+cd ~/Documents/Benchmarks/demo      # dtn-01: ~/Benchmarks/demo
 HOTEL_SRC=<hotel demo checkout> SOCIAL_SRC=<social demo checkout> MERCURY_SRC=<mercury demo checkout> ./build.sh
 ```
 This writes `bin/operate`, `bin/goperate` and `bin/speculator`. Without the variables it uses ../deathstar-* and ~/Mercury.
@@ -101,7 +101,7 @@ Each instance gets its own output directory, `<run>/<inst>/`.
 
 ## 4. Run
 ```
-cd ~/Benchmarks/demo
+cd ~/Documents/Benchmarks/demo      # dtn-01: ~/Benchmarks/demo
 ./run-demo.sh --dry-run                       # check the resolved values and the port map
 MERCURY_BIN=$HOME/agent-tools/demo/m/build/mercury ./run-demo.sh            # Apollo: two hotels, 2 x 5 min
 ./run-demo.sh --apps "hotel social"           # dtn-01 mode
@@ -126,7 +126,7 @@ run-demo.sh does **not** open speculator for you. Its only use of speculator is 
 
 Open speculator yourself, in a second terminal, and add the instances by hand:
 ```
-~/Benchmarks/demo/bin/speculator 28080
+~/Documents/Benchmarks/demo/bin/speculator 28080     # dtn-01: ~/Benchmarks/demo/bin/speculator
 ```
 It refreshes every 2 s and shows Mercury's group tree. Then:
 1. Press **Enter**. The menu appears: `a) add app   r) remove app   q) quit   Enter) back`.
@@ -145,7 +145,7 @@ Daemons that belong to no added app are grouped by their first id segment (`hote
 Non-interactive use:
 - Start with the apps already added: `speculator 28080 --app hotel-a=<run>/hotel-a/status --app hotel-b=<run>/hotel-b/status`.
 - `--once` prints one snapshot.
-- `--runs DIR` (or SPECULATOR_RUNS) changes where status files are suggested from; the default is ~/Benchmarks/demo/runs.
+- `--runs DIR` (or SPECULATOR_RUNS) changes where status files are suggested from; the default is ~/Documents/Benchmarks/demo/runs when that exists (the PC), else ~/Benchmarks/demo/runs (dtn-01).
 
 The two sines are 180° apart. When hotel-a's users peak, hotel-b's bottom out, and with gnn you can watch the cores follow.
 
