@@ -18,14 +18,15 @@ import (
 // Environment read by bin/loadgen. Mercury execs a daemon with no arguments,
 // so everything the generator needs arrives here.
 const (
-	envRole   = "OPERATE_ROLE"  // "loadgen" selects runLoadgen in main
-	envUsers  = "LOADGEN_USERS" // maximum users per route
-	envOut    = "LOADGEN_OUT"   // output file, one fsynced line per write
-	envID     = "LOADGEN_ID"    // this daemon's Mercury id, for its own cgroup
-	envConfig = "HOTEL_CONFIG"  // config.json path
-	envConns  = "LOADGEN_CONNS" // gRPC connections per route (0 = one per worker)
-	envFile   = "LOADGEN_FILE"  // deployment list, for the cpus column
-	envMax    = "LOADGEN_MAX"   // saturate max, for gen_bound
+	envRole   = "OPERATE_ROLE"      // "loadgen" selects runLoadgen in main
+	envUsers  = "LOADGEN_USERS"     // maximum users per route
+	envOut    = "LOADGEN_OUT"       // output file, one fsynced line per write
+	envID     = "LOADGEN_ID"        // this daemon's Mercury id, for its own cgroup
+	envConfig = "HOTEL_CONFIG"      // config.json path
+	envConns  = "LOADGEN_CONNS"     // gRPC connections per route (0 = one per worker)
+	envWindow = "LOADGEN_WINDOW_MS" // measurement window per autoscale reading
+	envFile   = "LOADGEN_FILE"      // deployment list, for the cpus column
+	envMax    = "LOADGEN_MAX"       // saturate max, for gen_bound
 	roleGen   = "loadgen"
 	doneLine  = "loadgen done"
 	errorLine = "loadgen error"
@@ -67,6 +68,13 @@ func loadgenMain(w io.Writer) error {
 	users, err := strconv.Atoi(os.Getenv(envUsers))
 	if err != nil || users < 1 {
 		return fmt.Errorf("%s must be a positive integer, got %q", envUsers, os.Getenv(envUsers))
+	}
+	if v := os.Getenv(envWindow); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 100 {
+			return fmt.Errorf("bad %s %q", envWindow, v)
+		}
+		windowMs = n
 	}
 	if v := os.Getenv(envConns); v != "" {
 		n, err := strconv.Atoi(v)
@@ -234,6 +242,7 @@ func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts
 		envID:        loadgenID,
 		envConfig:    opts.config,
 		envConns:     strconv.Itoa(opts.conns),
+		envWindow:    strconv.Itoa(windowMs),
 		envMax:       strconv.Itoa(opts.genMax),
 		"GOMAXPROCS": strconv.Itoa(opts.genProcs),
 	}

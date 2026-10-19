@@ -16,9 +16,14 @@ import (
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/boot"
 )
 
-const (
+// -svc-min / -svc-max: service scale bounds (-svc-min N -svc-max N = fixed N cores).
+var (
 	autoMaxCores = 16
-	autoWindows  = 4
+	svcMinCores  = 1
+)
+
+const (
+	autoWindows = 4
 
 	// Linux CPU 0 is Mercury. Homes begin at CPU 1, one per line of
 	// mercury-hotel.txt. The loader keeps clientFirstCPU through clientLastCPU.
@@ -98,13 +103,14 @@ func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int
 		if err := setCpus(base, line.id, spec); err != nil {
 			return err
 		}
-		if err := enableSaturate(base, line.id, 1, autoMaxCores); err != nil {
+		mn, mx := svcRange(line, svcMinCores, autoMaxCores)
+		if err := enableScale(base, line.id, servicePolicy, mn, mx); err != nil {
 			return err
 		}
 		fmt.Printf(" %s=%s", filepath.Base(line.path), spec)
 	}
 	fmt.Println()
-	fmt.Printf("policy saturate min 1 max %d users 1-%d\n", autoMaxCores, maxUsers)
+	fmt.Printf("policy %s placement %s tick_ms %d min %d max %d users 1-%d\n", servicePolicy, servicePlacement, serviceTickMs, svcMinCores, autoMaxCores, maxUsers)
 
 	for _, name := range hotelServiceNames {
 		if _, ok := findLine(lines, name); !ok {
@@ -139,8 +145,8 @@ func driveRoutes(cfg boot.Config, maxUsers int, w io.Writer, lines []tuple, gen 
 			cpus := cpuSetList(lines, readCPUSet)
 			for i, route := range routes {
 				reading := readings[i]
-				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f errors %d cpus %s %s\n",
-					route.name, clients, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.errors,
+				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s\n",
+					route.name, clients, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.p99Us, reading.errors,
 					cpus, gw)
 			}
 		}
@@ -188,13 +194,16 @@ func stopRoutes(routes []liveRoute) {
 	}
 }
 
+// windowMs is the autoscale measurement window (-window-ms, LOADGEN_WINDOW_MS); default 1 s.
+var windowMs = 1000
+
 func measureRoutes(routes []liveRoute) []reading {
 	befores := make([]snap, len(routes))
 	for i, route := range routes {
 		befores[i] = route.rec.snapshot()
 	}
 	began := time.Now()
-	time.Sleep(scaleMeasure)
+	time.Sleep(time.Duration(windowMs) * time.Millisecond)
 	elapsed := time.Since(began)
 	out := make([]reading, len(routes))
 	for i, route := range routes {
@@ -236,12 +245,32 @@ func rampClients(maxUsers int) []int {
 }
 
 func enableSaturate(base, id string, minCores, maxCores int) error {
-	status, body, err := post(base, "/scale", map[string]any{
+	return enableScale(base, id, "saturate", minCores, maxCores)
+}
+
+// Policy for the service daemons (-policy, -tick-ms, -placement). The load generator stays on saturate.
+var (
+	servicePolicy    = "saturate"
+	serviceTickMs    = 10
+	servicePlacement = "least_loaded"
+	servicePin       = true // -pin: gnn pins busy threads (false: cpuset sizing only)
+)
+
+// enableScale attaches policy (saturate or gnn) to a daemon with the -placement core hand-out.
+// tick_ms is sent for gnn only.
+func enableScale(base, id, policy string, minCores, maxCores int) error {
+	req := map[string]any{
 		"daemon_id": id,
-		"policy":    "saturate",
+		"policy":    policy,
 		"min":       minCores,
 		"max":       maxCores,
-	})
+		"placement": servicePlacement,
+	}
+	if policy == "gnn" {
+		req["tick_ms"] = serviceTickMs
+		req["pin"] = servicePin
+	}
+	status, body, err := post(base, "/scale", req)
 	if err != nil {
 		return err
 	}
@@ -274,4 +303,30 @@ func cpuSetList(lines []tuple, spec func(string) string) string {
 		b.WriteString(spec(line.id))
 	}
 	return b.String()
+}
+
+// svcFixed (-svc-fixed "geo=1,mongod=2"): per-program fixed allocation (/scale min = max), keyed by the
+// deployment line's program name (memcached port, mongod, service name). Others use -svc-min/-svc-max.
+var svcFixed = map[string]int{}
+
+func parseSvcFixed(s string) error {
+	for _, kv := range strings.Split(s, ",") {
+		if kv == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		n, err := strconv.Atoi(v)
+		if !ok || err != nil || n < 1 {
+			return fmt.Errorf("-svc-fixed: bad entry %q (want name=cores)", kv)
+		}
+		svcFixed[k] = n
+	}
+	return nil
+}
+
+func svcRange(line tuple, mn, mx int) (int, int) {
+	if k, ok := svcFixed[filepath.Base(line.path)]; ok {
+		return k, k
+	}
+	return mn, mx
 }

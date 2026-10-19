@@ -87,6 +87,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "usage: operate [flags] start|stop|test|scale|autoscale\n\n")
 		flag.PrintDefaults()
 	}
+	svcMin := flag.Int("svc-min", 1, "autoscale: per-service min cores")
+	svcMax := flag.Int("svc-max", 16, "autoscale: per-service max cores")
+	pin := flag.Bool("pin", true, "with -policy gnn: pin busy threads to CPUs (false = only size cpusets)")
+	window := flag.Int("window-ms", 1000, "autoscale measurement window in ms (4 windows per user step)")
+	policy := flag.String("policy", "saturate", "autoscale policy for the service daemons: saturate or gnn (the load generator stays on saturate)")
+	tickMs := flag.Int("tick-ms", 10, "gnn decision tick in ms (sent with -policy gnn)")
+	svcFixedFlag := flag.String("svc-fixed", "", "autoscale: per-program fixed cores, e.g. geo=1,mongod=2 (min = max for those daemons)")
+	placement := flag.String("placement", "least_loaded", "core hand-out for /scale: least_loaded or nearest_first")
 	flag.Parse()
 	cmd := "test"
 	if flag.NArg() > 0 {
@@ -102,6 +110,22 @@ func main() {
 	}
 	if *conns < 0 || *genMin < 1 || *genMax < *genMin || *genProcs < 1 {
 		fmt.Fprintln(os.Stderr, "need -conns >= 0, 1 <= -gen-min <= -gen-max, -gen-procs >= 1")
+		os.Exit(2)
+	}
+	if *policy != "saturate" && *policy != "gnn" || *placement != "least_loaded" && *placement != "nearest_first" || *tickMs < 10 {
+		fmt.Fprintln(os.Stderr, "need -policy saturate|gnn, -placement least_loaded|nearest_first, -tick-ms >= 10")
+		os.Exit(2)
+	}
+	if *window < 100 {
+		fmt.Fprintln(os.Stderr, "need -window-ms >= 100")
+		os.Exit(2)
+	}
+	windowMs = *window
+	servicePin = *pin
+	svcMinCores, autoMaxCores = *svcMin, *svcMax
+	servicePolicy, serviceTickMs, servicePlacement = *policy, *tickMs, *placement
+	if err := parseSvcFixed(*svcFixedFlag); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	connsPerRoute = *conns
@@ -295,8 +319,11 @@ func ping(base string) error {
 // while the runtime starts, before it samples the one-core cpuset. Memcached
 // and mongod do not, so their wrappers turn these variables into -t and
 // WiredTiger's concurrent-transaction caps.
+// threadCapCores caps service threads (memcached -t, WiredTiger, GOMAXPROCS) independently of -svc-max (gnn-slo-v1 sweep).
+const threadCapCores = 16
+
 func daemonEnv(line tuple, coldCache bool) map[string]string {
-	limit := strconv.Itoa(autoMaxCores)
+	limit := strconv.Itoa(threadCapCores) // not -svc-max: fixed-allocation sweeps keep the same thread counts
 	switch {
 	case strings.Contains(line.path, "/memcached/"):
 		return map[string]string{"MEMCACHED_THREADS": limit}
