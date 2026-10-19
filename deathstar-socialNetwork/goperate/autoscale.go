@@ -7,8 +7,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// svcMinCores/svcMaxCores: per-service /scale min and max (-svc-min, -svc-max; default 1 and
+// autoMaxCores). min = max gives a fixed allocation (gnn-slo-v1 allocation sweep). Thread caps
+// (daemonEnv) stay at autoMaxCores so the services are the same in every sweep run.
+var svcMinCores, svcMaxCores = 1, autoMaxCores
 
 // root is the Benchmarks checkout; DSB_ROOT overrides it.
 var (
@@ -24,7 +30,6 @@ func envOr(k, d string) string {
 }
 
 const (
-
 	autoMaxCores = 16
 	autoWindows  = 4
 	scaleMeasure = time.Second
@@ -76,6 +81,9 @@ func daemonHomes(n int) ([]int, error) {
 	if n < 1 {
 		return nil, fmt.Errorf("no daemons")
 	}
+	if demoLoad.homes != "" {
+		return listHomes(demoLoad.homes, n) // -homes: demo splits the pool between apps
+	}
 	homes := make([]int, n)
 	for i := range homes {
 		cpu := homeFirstLinux + i
@@ -91,6 +99,7 @@ func daemonHomes(n int) ([]int, error) {
 // saturate 1..16, and drives the social-network routes together from 1 user
 // to maxUsers and back down.
 func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers int, opts clientOpts, track func(tuple)) error {
+	maxUsers = demoLoad.workers(maxUsers)
 	homes, err := daemonHomes(len(lines))
 	if err != nil {
 		return err
@@ -120,15 +129,27 @@ func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers i
 		if saturateOnly[filepath.Base(line.path)] {
 			pol = "saturate" // -saturate-only: e.g. too many threads for gnn's per-tick read
 		}
-		if err := enableScale(base, line.id, pol, 1, autoMaxCores); err != nil {
+		mn, mx := svcRange(line, svcMinCores, svcMaxCores)
+		if err := enableScale(base, line.id, pol, mn, mx); err != nil {
 			return err
 		}
 		fmt.Printf(" %s=%s", filepath.Base(line.path), spec)
 	}
 	fmt.Println()
-	fmt.Printf("policy %s placement %s tick_ms %d min 1 max %d users 1-%d routes %s mix %s graph %s\n",
-		servicePolicy, servicePlacement, serviceTickMs, autoMaxCores, maxUsers, opts.routes, orDefault(opts.mix, "equal"), opts.graph)
+	fmt.Printf("policy %s placement %s tick_ms %d min %d max %d users 1-%d routes %s mix %s graph %s\n",
+		servicePolicy, servicePlacement, serviceTickMs, svcMinCores, svcMaxCores, maxUsers, opts.routes, orDefault(opts.mix, "equal"), opts.graph)
 
+	fmt.Println(demoLoad.describe())
+	closeWindows, err := startWindowLog(opts.out, socialOutputDir())
+	if err != nil {
+		return err
+	}
+	defer closeWindows()
+	out, finishTraces, err := beginTraceAnalysis()
+	if err != nil {
+		return err
+	}
+	defer finishTraces()
 	if opts.mode == clientInproc {
 		w, err := loadGraph(opts.graph)
 		if err != nil {
@@ -137,10 +158,11 @@ func autoscaleServices(base string, cfg serviceConfig, lines []tuple, maxUsers i
 		if w.mix, err = parseMix(opts.mix, names); err != nil {
 			return err
 		}
+		traceMarks = tracing.enabled()
 		gen := &genMeter{cpus: inprocCPUs, busy: selfBusy, max: len(clientCPUs())}
-		return driveRoutes(cfg, names, maxUsers, w, os.Stdout, lines, gen)
+		return driveRoutes(cfg, names, maxUsers, w, out, lines, gen)
 	}
-	return runMercuryLoadgen(base, maxUsers, opts, track)
+	return runMercuryLoadgen(base, maxUsers, opts, track, out)
 }
 
 func orDefault(s, d string) string {
@@ -160,22 +182,58 @@ func driveRoutes(cfg serviceConfig, names []string, maxUsers int, wl *workload, 
 	if err != nil {
 		return err
 	}
-	for _, clients := range rampClients(maxUsers) {
+	var marks markCounter
+	next := demoLoad.levels(maxUsers, windowMs, time.Now) // -load ramp or sine (demoload.go)
+	for {
+		lv, ok := next()
+		if !ok {
+			break
+		}
+		level, clients := lv.level, lv.clients
 		for _, route := range routes {
 			route.rec.setActive(int32(routeUsers(clients, route.weight)))
 		}
-		for window := 0; window < autoWindows; window++ {
+		for window := 0; window < lv.windows; window++ {
 			g0 := gen.begin()
+			t0 := time.Now()
 			readings := measureRoutes(routes)
+			t1 := time.Now()
 			gw := gen.end(g0)
 			cpus := cpuSetList(lines, readCPUSet)
+			marks.emit(w, level, window, clients, t0, t1) // -jaeger only: window marker for the trace analyser
 			for i, route := range routes {
 				reading := readings[i]
-				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s\n",
+				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s%s\n",
 					route.name, routeUsers(clients, route.weight), reading.arrivalRate, reading.serviceRate,
-					reading.avgUs, reading.p95Us, reading.p99Us, reading.errors, cpus, gw)
+					reading.avgUs, reading.p95Us, reading.p99Us, reading.errors, cpus, gw, lv.suffix())
 			}
 		}
 	}
 	return nil
+}
+
+// svcFixed (-svc-fixed "geo=1,mongod=2"): per-program fixed allocation (/scale min = max), keyed by the
+// deployment line's program name (memcached port, mongod, service name). Others use -svc-min/-svc-max.
+var svcFixed = map[string]int{}
+
+func parseSvcFixed(s string) error {
+	for _, kv := range strings.Split(s, ",") {
+		if kv == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		n, err := strconv.Atoi(v)
+		if !ok || err != nil || n < 1 {
+			return fmt.Errorf("-svc-fixed: bad entry %q (want name=cores)", kv)
+		}
+		svcFixed[k] = n
+	}
+	return nil
+}
+
+func svcRange(line tuple, mn, mx int) (int, int) {
+	if k, ok := svcFixed[filepath.Base(line.path)]; ok {
+		return k, k
+	}
+	return mn, mx
 }
