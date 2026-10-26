@@ -9,8 +9,23 @@
 #include <unistd.h>
 
 static const char *kServer = "/usr/bin/redis-server";
-static const char *kRoot = "/home/paul/Benchmarks/runtime/redis";
+static char kRoot[PATH_MAX];
 static const int kDefaultPort = 6379;
+
+static void init_paths(void) {
+  char path[PATH_MAX];
+  ssize_t n = readlink("/proc/self/exe", path, sizeof path - 1);
+  if (n < 0) {
+    perror("redis-server: readlink");
+    exit(1);
+  }
+  path[n] = '\0';
+  char *slash = strrchr(path, '/');
+  if (slash != NULL) {
+    *slash = '\0';
+  }
+  snprintf(kRoot, sizeof kRoot, "%s", path);
+}
 
 static int parse_port(const char *text) {
   char *end = NULL;
@@ -56,6 +71,7 @@ static void mkdir_one(const char *path) {
 }
 
 int main(int argc, char **argv) {
+  init_paths();
   int port = advertise_port(argc, argv);
   char datadir[PATH_MAX];
   char port_text[16];
