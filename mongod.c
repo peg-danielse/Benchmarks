@@ -8,9 +8,25 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const char *kServer = "/home/paul/Benchmarks/runtime/mongodb/bin/mongod";
-static const char *kRoot = "/home/paul/Benchmarks/runtime/mongodb";
+static char kServer[PATH_MAX];
+static char kRoot[PATH_MAX];
 static const int kDefaultPort = 27017;
+
+static void init_paths(void) {
+  char path[PATH_MAX];
+  ssize_t n = readlink("/proc/self/exe", path, sizeof path - 1);
+  if (n < 0) {
+    perror("mongod: readlink");
+    exit(1);
+  }
+  path[n] = '\0';
+  char *slash = strrchr(path, '/');
+  if (slash != NULL) {
+    *slash = '\0';
+  }
+  snprintf(kRoot, sizeof kRoot, "%s", path);
+  snprintf(kServer, sizeof kServer, "%s/bin/mongod", kRoot);
+}
 
 static int parse_port(const char *text) {
   char *end = NULL;
@@ -56,6 +72,7 @@ static void mkdir_one(const char *path) {
 }
 
 int main(int argc, char **argv) {
+  init_paths();
   int port = advertise_port(argc, argv);
   char base[PATH_MAX];
   char dbpath[PATH_MAX];
