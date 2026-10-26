@@ -118,7 +118,7 @@ and e.g. `operate ... -jaeger -jaeger-port-offset 20000 -jaeger-cpus 62 autoscal
 
 ## Tests (PC)
 
-* Unit tests: `go test ./operate` (hotel, with `DSB_ROOT=/home/pager/Benchmarks` on the PC) and
+* Unit tests: `go test ./operate` (hotel; `DSB_ROOT` defaults to this repository's `benchmarks/`) and
   `cd goperate && go test -mod=vendor .` (social): hand-built v3 traces with exact critical paths
   (sequential, parallel, async consumer, store calls, RPC overhead), real recorded hotel traces,
   a fake Jaeger HTTP server end to end, marker/sniffer/flags.
