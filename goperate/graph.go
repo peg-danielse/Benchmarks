@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,7 +14,9 @@ import (
 	sn "socialnetwork/goperate/social_network"
 )
 
-const defaultGraph = snRoot + "/datasets/social-graph/socfb-Reed98/socfb-Reed98.edges"
+func defaultGraph() string {
+	return filepath.Join(socialRoot(), "datasets/social-graph/socfb-Reed98/socfb-Reed98.edges")
+}
 
 // alreadyStored matches the messages the C++ services return for a user or
 // edge that exists, the same test as operate/graph.cpp.

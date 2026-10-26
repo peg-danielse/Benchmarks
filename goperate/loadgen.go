@@ -85,7 +85,7 @@ func loadgenMain(w io.Writer) error {
 	}
 	configPath := os.Getenv(envConfig)
 	if configPath == "" {
-		configPath = snRoot + "/config/service-config.json"
+		configPath = socialRoot() + "/config/service-config.json"
 	}
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -93,7 +93,7 @@ func loadgenMain(w io.Writer) error {
 	}
 	file := os.Getenv(envFile)
 	if file == "" {
-		file = root + "/mercury-social.txt"
+		file = benchmarksRoot() + "/mercury-social.txt"
 	}
 	lines, err := parseFile(file)
 	if err != nil {
@@ -101,7 +101,7 @@ func loadgenMain(w io.Writer) error {
 	}
 	graph := os.Getenv(envGraph)
 	if graph == "" {
-		graph = defaultGraph
+		graph = defaultGraph()
 	}
 	names, err := parseRoutes(orDefault(os.Getenv(envRoutes), defaultRoutes))
 	if err != nil {
@@ -241,7 +241,7 @@ func runMercuryLoadgen(base string, maxUsers int, opts clientOpts, track func(tu
 	}
 	out := opts.out
 	if out == "" {
-		out = filepath.Join(snRoot, "output",
+		out = filepath.Join(socialRoot(), "output",
 			fmt.Sprintf("loadgen-%d.out", time.Now().Unix()))
 	}
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {

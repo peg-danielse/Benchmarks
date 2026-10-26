@@ -28,6 +28,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <linux/limits.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -48,7 +50,44 @@
 
 namespace {
 
-const char* kRoot = "/home/paul/Benchmarks";
+[[noreturn]] void die(const std::string& message);
+
+const std::string& benchmarks_root() {
+  static const std::string root = [] {
+    if (const char* env = std::getenv("DSB_ROOT")) {
+      if (env[0] != '\0') {
+        return std::string(env);
+      }
+    }
+    char buf[PATH_MAX];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n < 0) {
+      die("readlink /proc/self/exe");
+    }
+    buf[n] = '\0';
+    std::string dir(buf);
+    while (true) {
+      const auto slash = dir.find_last_of('/');
+      if (slash == std::string::npos || slash == 0) {
+        break;
+      }
+      dir.resize(slash);
+      std::ifstream marker(dir + "/deathstar-hotelReservations/config.json");
+      if (marker) {
+        return dir;
+      }
+    }
+    die(std::string("cannot find the benchmarks directory from ") + buf);
+  }();
+  return root;
+}
+
+std::string resolve_exec(const std::string& path) {
+  if (!path.empty() && path[0] == '/') {
+    return path;
+  }
+  return benchmarks_root() + "/" + path;
+}
 
 struct Tuple {
   std::string path;
@@ -180,7 +219,8 @@ std::vector<Tuple> parse_file(const std::string& path) {
     if (row >> extra) {
       throw std::runtime_error(path + ":" + std::to_string(number) + ": want exec_path and hostname");
     }
-    Tuple line{exec_path, hostname, "social-" + basename_of(exec_path)};
+    const std::string resolved = resolve_exec(exec_path);
+    Tuple line{resolved, hostname, "social-" + basename_of(resolved)};
     for (const auto& existing : lines) {
       if (existing.id == line.id) {
         throw std::runtime_error("duplicate daemon id " + line.id);
@@ -419,7 +459,7 @@ std::string resolve_graph(const std::string& graph) {
   if (readable(graph)) {
     return graph;
   }
-  const std::string rooted = std::string(kRoot) + "/deathstar-socialNetwork/" + graph;
+  const std::string rooted = benchmarks_root() + "/deathstar-socialNetwork/" + graph;
   if (readable(rooted)) {
     return rooted;
   }
@@ -431,8 +471,8 @@ std::string resolve_graph(const std::string& graph) {
 int main(int argc, char** argv) {
   std::string mercury = "127.0.0.1:8080";
   int cpu = 0;
-  std::string file = std::string(kRoot) + "/mercury-social.txt";
-  std::string config_path = std::string(kRoot) + "/deathstar-socialNetwork/config/service-config.json";
+  std::string file = benchmarks_root() + "/mercury-social.txt";
+  std::string config_path = benchmarks_root() + "/deathstar-socialNetwork/config/service-config.json";
   std::string graph;
   std::vector<std::string> args;
   for (int i = 1; i < argc; ++i) {
@@ -486,7 +526,7 @@ int main(int argc, char** argv) {
     }
     if (command == "init") {
       if (graph.empty()) {
-        graph = std::string(kRoot) + "/deathstar-socialNetwork/datasets/social-graph/socfb-Reed98/socfb-Reed98.edges";
+        graph = benchmarks_root() + "/deathstar-socialNetwork/datasets/social-graph/socfb-Reed98/socfb-Reed98.edges";
       }
       graph = resolve_graph(graph);
     }

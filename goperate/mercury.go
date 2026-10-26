@@ -53,7 +53,7 @@ func parseFile(path string) ([]tuple, error) {
 			return nil, fmt.Errorf("duplicate daemon id %s", id)
 		}
 		seen[id] = true
-		lines = append(lines, tuple{path: fields[0], hostname: fields[1], id: id})
+		lines = append(lines, tuple{path: resolveExec(fields[0]), hostname: fields[1], id: id})
 	}
 	if len(lines) == 0 {
 		return nil, fmt.Errorf("%s has no programs", path)

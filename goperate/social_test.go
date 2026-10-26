@@ -68,11 +68,11 @@ func TestParseFileAndListen(t *testing.T) {
 const writeDup = "/a/run/UserService h\n/b/run/UserService h\n"
 
 func TestRealDeploymentList(t *testing.T) {
-	lines, err := parseFile(root + "/mercury-social.txt")
+	lines, err := parseFile(benchmarksRoot() + "/mercury-social.txt")
 	if err != nil {
 		t.Skip("no mercury-social.txt here")
 	}
-	cfg, err := loadConfig(snRoot + "/config/service-config.json")
+	cfg, err := loadConfig(socialRoot() + "/config/service-config.json")
 	if err != nil {
 		t.Skip("no service-config.json here")
 	}

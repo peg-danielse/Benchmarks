@@ -11,9 +11,6 @@ import (
 )
 
 const (
-	root   = "/home/paul/Benchmarks"
-	snRoot = root + "/deathstar-socialNetwork"
-
 	autoMaxCores = 16
 	autoWindows  = 4
 	scaleMeasure = time.Second
@@ -33,6 +30,58 @@ const (
 	defaultGenMax   = 8
 	defaultGenProcs = 8
 )
+
+// benchmarksRoot is this repository's benchmarks directory: DSB_ROOT, else the
+// directory above the built binary, else the source tree (go test / go run).
+func benchmarksRoot() string {
+	if r := os.Getenv("DSB_ROOT"); r != "" {
+		return r
+	}
+	if exe, err := os.Executable(); err == nil {
+		if exe, err = filepath.EvalSymlinks(exe); err == nil {
+			if r := findBenchmarks(filepath.Dir(exe)); r != "" {
+				return r
+			}
+		}
+	}
+	if _, file, _, ok := runtime.Caller(0); ok {
+		if r := findBenchmarks(filepath.Dir(file)); r != "" {
+			return r
+		}
+	}
+	fmt.Fprintln(os.Stderr, "cannot find the benchmarks directory; set DSB_ROOT")
+	os.Exit(1)
+	return ""
+}
+
+func findBenchmarks(start string) string {
+	dir := start
+	for {
+		hotel := filepath.Join(dir, "deathstar-hotelReservations")
+		runtimeDir := filepath.Join(dir, "runtime")
+		if info, err := os.Stat(hotel); err == nil && info.IsDir() {
+			if info, err = os.Stat(runtimeDir); err == nil && info.IsDir() {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func socialRoot() string {
+	return filepath.Join(benchmarksRoot(), "deathstar-socialNetwork")
+}
+
+func resolveExec(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(benchmarksRoot(), path)
+}
 
 // clientOpts chooses how autoscale drives load; see hotel operate for the
 // same design. mercury: bin/loadgen as Mercury daemon social-loadgen.
