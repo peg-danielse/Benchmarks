@@ -9,8 +9,23 @@
 #include <unistd.h>
 
 static const char *kServer = "/usr/lib/rabbitmq/bin/rabbitmq-server";
-static const char *kRoot = "/home/paul/Benchmarks/runtime/rabbitmq";
+static char kRoot[PATH_MAX];
 static const int kDefaultPort = 5672;
+
+static void init_paths(void) {
+  char path[PATH_MAX];
+  ssize_t n = readlink("/proc/self/exe", path, sizeof path - 1);
+  if (n < 0) {
+    perror("rabbitmq-server: readlink");
+    exit(1);
+  }
+  path[n] = '\0';
+  char *slash = strrchr(path, '/');
+  if (slash != NULL) {
+    *slash = '\0';
+  }
+  snprintf(kRoot, sizeof kRoot, "%s", path);
+}
 
 static int parse_port(const char *text) {
   char *end = NULL;
@@ -73,6 +88,7 @@ static void write_config(const char *path, int port) {
 }
 
 int main(int argc, char **argv) {
+  init_paths();
   int port = advertise_port(argc, argv);
   char base[PATH_MAX];
   char mnesia[PATH_MAX];
