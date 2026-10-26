@@ -9,3 +9,4 @@ git-commit-id.h
 stress-ng
 stress-ng.exe
 *.o
+apparmor-data.h
