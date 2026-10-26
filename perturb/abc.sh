@@ -16,7 +16,7 @@ SYS=$1; OUT=$(realpath -m $2); REPS=${3:-1}
 # Host layout: defaults are dtn-01 (64 CPUs). hosts/$(hostname -s).env, or HOST_ENV=file, overrides them.
 HERE=$(cd "$(dirname "$0")" && pwd)
 HOST_ENV=${HOST_ENV:-$HERE/hosts/$(hostname -s).env}; [ -f "$HOST_ENV" ] && . "$HOST_ENV"
-B=${DSB_ROOT:-/home/paul/Benchmarks}; M=${MERCURY_ROOT:-/home/paul/Mercury}; export DSB_ROOT=$B
+M=${MERCURY_ROOT:-$(cd "$HERE/../../.." && pwd)}; B=${DSB_ROOT:-$M/benchmarks}; export DSB_ROOT=$B
 MERCURY_CPU=${MERCURY_CPU:-0}; POOL=${POOL:-1-60}; GEN_CPU=${GEN_CPU:-60}
 OP_CPU=${OP_CPU:-61}; HELPER_CPU=${HELPER_CPU:-62}
 STRESS_CACHE_CPUS=${STRESS_CACHE_CPUS:-33-40}; STRESS_STREAM_CPUS=${STRESS_STREAM_CPUS:-41-47}
