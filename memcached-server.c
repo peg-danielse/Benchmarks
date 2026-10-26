@@ -8,7 +8,22 @@
 #include <string.h>
 #include <unistd.h>
 
-static const char *kServer = "/usr/bin/memcached";
+static char kServer[PATH_MAX];
+
+static void init_paths(void) {
+  char path[PATH_MAX];
+  ssize_t n = readlink("/proc/self/exe", path, sizeof path - 1);
+  if (n < 0) {
+    perror("memcached: readlink");
+    exit(1);
+  }
+  path[n] = '\0';
+  char *slash = strrchr(path, '/');
+  if (slash != NULL) {
+    *slash = '\0';
+  }
+  snprintf(kServer, sizeof kServer, "%s/local/bin/memcached", path);
+}
 
 static int parse_port(const char *text) {
   char *end = NULL;
@@ -64,6 +79,7 @@ static int advertise_port(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+  init_paths();
   int port = advertise_port(argc, argv);
   char port_text[16];
   snprintf(port_text, sizeof port_text, "%d", port);
