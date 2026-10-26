@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/boot"
@@ -51,6 +54,56 @@ const (
 // connsPerRoute is how many gRPC connections one route shares among its
 // workers (round-robin by worker index). 0 restores one connection per worker.
 var connsPerRoute = 16
+
+// loadRoutes are the routes autoscale drives (-routes, LOADGEN_ROUTES for bin/loadgen). Every
+// program in the deployment still starts; the services of the other routes only sit idle.
+var loadRoutes = frontendRoutes
+
+// loadEntry: frontend (default: every route is a frontend HTTP endpoint, as a real client sees the app) or services
+// (each route calls one service directly over gRPC, the earlier sweeps).
+var loadEntry = entryFrontend
+
+const (
+	entryFrontend = "frontend"
+	entryServices = "services"
+)
+
+// frontendRoutes are the hotel frontend's endpoints (services/frontend/server.go); each calls the services behind it.
+var frontendRoutes = []string{"hotels", "recommendations", "user", "review", "restaurants", "museums", "cinema", "reservation"}
+
+func allRoutes() []string {
+	if loadEntry == entryServices {
+		return hotelServiceNames
+	}
+	return frontendRoutes
+}
+
+// parseRoutes reads a comma list of route names ("" or "all": every route of the entry), in that order.
+func parseRoutes(list string) ([]string, error) {
+	names := allRoutes()
+	if list == "" || list == "all" {
+		return names, nil
+	}
+	want := map[string]bool{}
+	for _, name := range strings.Split(list, ",") {
+		name = strings.TrimSpace(name)
+		known := false
+		for _, n := range names {
+			known = known || n == name
+		}
+		if !known {
+			return nil, fmt.Errorf("unknown route %q for -entry %s (routes: %s)", name, loadEntry, strings.Join(names, ","))
+		}
+		want[name] = true
+	}
+	var out []string
+	for _, n := range names {
+		if want[n] {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
 
 var scaleWidths = []int{1, 2, 4, 8, 16, 32}
 
@@ -184,13 +237,16 @@ func sweepService(base string, cfg boot.Config, line tuple, home string) error {
 		}
 		time.Sleep(scaleWarmup)
 		reading := measure(rec)
-		fmt.Printf("service %s cores %d cpus %s arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f errors %d\n",
-			name, cores, spec, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.errors)
+		fmt.Printf("service %s cores %d cpus %s arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d\n",
+			name, cores, spec, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.p99Us, reading.errors)
 	}
 	return setCpus(base, line.id, home)
 }
 
 func openLoad(cfg boot.Config, name string, workers int) (load, error) {
+	if loadEntry == entryFrontend {
+		return openFrontendRoute(cfg, name, workers)
+	}
 	if name == "frontend" {
 		return openFrontend(cfg, workers)
 	}
@@ -446,6 +502,7 @@ type reading struct {
 	serviceRate uint64
 	avgUs       float64
 	p95Us       float64
+	p99Us       float64
 	errors      uint64
 }
 
@@ -470,6 +527,7 @@ func readWindow(before, after snap, elapsed time.Duration) reading {
 		serviceRate: perSecond(d.done, elapsed),
 		avgUs:       avg / float64(time.Microsecond),
 		p95Us:       float64(d.percentile(0.95)) / float64(time.Microsecond),
+		p99Us:       float64(d.percentile(0.99)) / float64(time.Microsecond),
 		errors:      d.errs,
 	}
 }
@@ -511,4 +569,77 @@ func sameIDs(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// openFrontendRoute calls one frontend endpoint over HTTP with per-request parameters drawn the way DSB's mixed
+// hotel workload draws them: check-in 9-23 April 2015 for 1-4 nights, a position around San Francisco, one of the
+// 501 users (Cornell_<hex of the decimal id>, password = the id 10 times, cmd/user/db.go) and hotels 1-80.
+// The frontend answers 200 with "Failed. ..." in the body on a bad login, so that counts as an error; "No Reviews",
+// "Already reserved" and other business answers count as served requests.
+func openFrontendRoute(cfg boot.Config, route string, workers int) (load, error) {
+	addr, err := cfg.Address("frontend")
+	if err != nil {
+		return load{}, err
+	}
+	n := workers
+	if n < 64 {
+		n = 64
+	}
+	client := &http.Client{Transport: &http.Transport{
+		MaxIdleConns: n, MaxIdleConnsPerHost: n, MaxConnsPerHost: 0, DisableCompression: true,
+	}}
+	var seq atomic.Int64
+	base := "http://" + addr + "/" + route + "?"
+	query := func(r *rand.Rand) (string, error) {
+		day := 9 + r.Intn(15)
+		in := fmt.Sprintf("2015-04-%02d", day)
+		out := fmt.Sprintf("2015-04-%02d", day+1+r.Intn(4))
+		lat := 38.0235 + float64(r.Intn(481)-240)/1000
+		lon := -122.095 + float64(r.Intn(325)-157)/1000
+		id := strconv.Itoa(r.Intn(501))
+		user := fmt.Sprintf("username=Cornell_%x&password=%s", id, strings.Repeat(id, 10))
+		hotel := strconv.Itoa(1 + r.Intn(80))
+		switch route {
+		case "hotels":
+			return fmt.Sprintf("inDate=%s&outDate=%s&lat=%.4f&lon=%.4f", in, out, lat, lon), nil
+		case "recommendations":
+			req := [...]string{"dis", "rate", "price"}[r.Intn(3)]
+			return fmt.Sprintf("require=%s&lat=%.4f&lon=%.4f", req, lat, lon), nil
+		case "user":
+			return user, nil
+		case "review", "restaurants", "museums", "cinema":
+			return user + "&hotelId=" + hotel, nil
+		case "reservation":
+			return fmt.Sprintf("inDate=%s&outDate=%s&lat=%.4f&lon=%.4f&hotelId=%s&customerName=Cornell_%x&%s&number=1",
+				in, out, lat, lon, hotel, id, user), nil
+		}
+		return "", fmt.Errorf("unknown frontend route %q", route)
+	}
+	if _, err := query(rand.New(rand.NewSource(1))); err != nil {
+		return load{}, err
+	}
+	return load{
+		call: func(ctx context.Context, _ int) error {
+			r := rand.New(rand.NewSource(seq.Add(1)))
+			q, _ := query(r)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+q, nil)
+			if err != nil {
+				return err
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			if err != nil {
+				return err
+			}
+			if resp.StatusCode != http.StatusOK || bytes.Contains(body, []byte("check your username and password")) {
+				return fmt.Errorf("%s status %d body %s", route, resp.StatusCode, clipBody(body))
+			}
+			return nil
+		},
+		close: func() { client.CloseIdleConnections() },
+	}, nil
 }

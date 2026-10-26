@@ -46,6 +46,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,7 +60,62 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-const root = "/home/paul/Benchmarks"
+// root is this repository's benchmarks directory: DSB_ROOT, else the directory
+// above the built binary, else the source tree (go test / go run).
+var root = benchmarksRoot()
+
+func benchmarksRoot() string {
+	if r := os.Getenv("DSB_ROOT"); r != "" {
+		return r
+	}
+	if exe, err := os.Executable(); err == nil {
+		if exe, err = filepath.EvalSymlinks(exe); err == nil {
+			if r := findBenchmarks(filepath.Dir(exe)); r != "" {
+				return r
+			}
+		}
+	}
+	if _, file, _, ok := runtime.Caller(0); ok {
+		if r := findBenchmarks(filepath.Dir(file)); r != "" {
+			return r
+		}
+	}
+	fmt.Fprintln(os.Stderr, "cannot find the benchmarks directory; set DSB_ROOT")
+	os.Exit(1)
+	return ""
+}
+
+func findBenchmarks(start string) string {
+	dir := start
+	for {
+		hotel := filepath.Join(dir, "deathstar-hotelReservations")
+		runtimeDir := filepath.Join(dir, "runtime")
+		if info, err := os.Stat(hotel); err == nil && info.IsDir() {
+			if info, err = os.Stat(runtimeDir); err == nil && info.IsDir() {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func envOr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+
+func resolveExec(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(benchmarksRoot(), path)
+}
 
 func main() {
 	if os.Getenv(envRole) == roleGen {
@@ -69,6 +125,9 @@ func main() {
 		}
 		return
 	}
+	prefix := flag.String("prefix", "hotel", "daemon id prefix (<prefix>-geo, <prefix>-loadgen, ...); give each hotel sharing a Mercury its own")
+	flag.StringVar(&readyFile, "ready-file", "", "autoscale: after every daemon listens, write this file and wait for -go-file before any load (run-demo.sh port checks)")
+	flag.StringVar(&goFile, "go-file", "", "with -ready-file: the file to wait for (default <ready-file>.go)")
 	mercury := flag.String("mercury", "127.0.0.1:8080", "Mercury host:port")
 	cpu := flag.Int("cpu", 0, "daemon CPU number Mercury was given (not the CPU Mercury pinned itself to)")
 	users := flag.Int("users", 1024, "maximum concurrent users on each autoscale route")
@@ -76,6 +135,9 @@ func main() {
 	file := flag.String("file", root+"/mercury-hotel.txt", "deployment list")
 	configPath := flag.String("config", root+"/deathstar-hotelReservations/config.json", "hotel address file")
 	client := flag.String("client", clientMercury, "autoscale load generator: mercury (bin/loadgen as a Mercury daemon) or inproc (this process pinned to CPUs 60-63)")
+	entryFlag := flag.String("entry", entryFrontend, "autoscale routes: frontend (the frontend's HTTP endpoints: hotels, recommendations, user, review, restaurants, museums, cinema, reservation) or services (each service directly over gRPC, as the earlier sweeps)")
+	histFlag := flag.Bool("hist", false, "autoscale: write every window's latency histogram per route to <gen-out stem>.hist.jsonl (deadline miss rates offline)")
+	routesFlag := flag.String("routes", "all", "autoscale: comma list of routes to drive (geo,profile,rate,recommendation,user,reservation,search,review,attractions,frontend); the other services start but stay idle")
 	conns := flag.Int("conns", 16, "gRPC connections each route shares among its workers; 0 = one per worker (old behaviour)")
 	genBin := flag.String("gen-bin", root+"/deathstar-hotelReservations/bin/loadgen", "loadgen binary for -client mercury")
 	genOut := flag.String("gen-out", "", "loadgen output file (default output/loadgen-<unix>.out)")
@@ -87,7 +149,23 @@ func main() {
 		fmt.Fprintf(os.Stderr, "usage: operate [flags] start|stop|test|scale|autoscale\n\n")
 		flag.PrintDefaults()
 	}
+	svcMin := flag.Int("svc-min", 1, "autoscale: per-service min cores")
+	svcMax := flag.Int("svc-max", 16, "autoscale: per-service max cores")
+	pin := flag.Bool("pin", true, "with -policy gnn: pin busy threads to CPUs (false = only size cpusets)")
+	window := flag.Int("window-ms", 1000, "autoscale measurement window in ms (4 windows per user step)")
+	policy := flag.String("policy", "saturate", "autoscale policy for the service daemons: saturate or gnn (the load generator stays on saturate)")
+	tickMs := flag.Int("tick-ms", 10, "gnn decision tick in ms (sent with -policy gnn)")
+	svcFixedFlag := flag.String("svc-fixed", "", "autoscale: per-program fixed cores, e.g. geo=1,mongod=2 (min = max for those daemons)")
+	placement := flag.String("placement", "least_loaded", "core hand-out for /scale: least_loaded or nearest_first")
+	addLoadFlags("hotel")          // -load sine, -users-min/-max, -period, -phase, -step, -duration, -ramp-in, -homes: demoload.go
+	tracing = addJaegerFlags(root) // -jaeger*, -trace-*: see jaegercp.go and jaeger_app.go
 	flag.Parse()
+	idPrefix, loadgenID = *prefix, *prefix+"-loadgen"
+	demoLoad.app = *prefix
+	if err := tracing.validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	cmd := "test"
 	if flag.NArg() > 0 {
 		cmd = flag.Arg(0)
@@ -104,7 +182,61 @@ func main() {
 		fmt.Fprintln(os.Stderr, "need -conns >= 0, 1 <= -gen-min <= -gen-max, -gen-procs >= 1")
 		os.Exit(2)
 	}
+	if *policy != "saturate" && *policy != "gnn" || *placement != "least_loaded" && *placement != "nearest_first" || *tickMs < 10 {
+		fmt.Fprintln(os.Stderr, "need -policy saturate|gnn, -placement least_loaded|nearest_first, -tick-ms >= 10")
+		os.Exit(2)
+	}
+	if *window < 100 {
+		fmt.Fprintln(os.Stderr, "need -window-ms >= 100")
+		os.Exit(2)
+	}
+	windowMs = *window
+	if err := demoLoad.validate(windowMs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if demoLoad.sine() && *client == clientMercury && *genOut == "" {
+		*genOut = defaultGenOut() // the windows CSV sits next to it
+	}
+	servicePin = *pin
+	svcMinCores, autoMaxCores = *svcMin, *svcMax
+	servicePolicy, serviceTickMs, servicePlacement = *policy, *tickMs, *placement
+	if err := parseSvcFixed(*svcFixedFlag); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	connsPerRoute = *conns
+	var err error
+	if *entryFlag != entryFrontend && *entryFlag != entryServices {
+		fmt.Fprintf(os.Stderr, "-entry must be %s or %s\n", entryFrontend, entryServices)
+		os.Exit(2)
+	}
+	loadEntry = *entryFlag
+	if loadRoutes, err = parseRoutes(*routesFlag); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if *histFlag {
+		if *genOut == "" {
+			*genOut = defaultGenOut()
+		}
+		histPath = strings.TrimSuffix(*genOut, ".out") + ".hist.jsonl"
+		if *client == clientInproc { // this process drives the routes itself
+			hf, err := os.Create(histPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			defer hf.Close()
+			histOut = hf
+		}
+	}
+	if tracing.enabled() {
+		if *client == clientMercury && *genOut == "" {
+			*genOut = defaultGenOut()
+		}
+		tracing.out = tracing.csvPath(*genOut, hotelOutputDir())
+	}
 	opts := clientOpts{
 		mode: *client, bin: *genBin, out: *genOut, config: *configPath, homeCPU: *genCPU,
 		genMin: *genMin, genMax: *genMax, genProcs: *genProcs, conns: *conns,
@@ -130,6 +262,11 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 	if err != nil {
 		return err
 	}
+	for svc, addr := range cfg.Memcached { // trace attribution follows this instance's memcached ports
+		if _, port, err := net.SplitHostPort(addr); err == nil {
+			hotelMemcached[svc] = port
+		}
+	}
 	base := mercuryURL(mercury)
 	if err := ping(base); err != nil {
 		return err
@@ -137,6 +274,9 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 
 	switch cmd {
 	case "stop":
+		if tracing.enabled() && tracing.mode == jaegerModeMercury {
+			_ = kill(base, idPrefix+"-jaeger")
+		}
 		return stopAll(base, lines)
 	case "start", "test", "scale", "autoscale":
 		if cpu < 1 {
@@ -152,6 +292,7 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 	var (
 		startedMu sync.Mutex
 		started   []tuple
+		jaeger    *jaegerProc
 	)
 	track := func(t tuple) {
 		startedMu.Lock()
@@ -166,6 +307,8 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 				fmt.Fprintf(os.Stderr, "kill %s: %v\n", started[i].id, err)
 			}
 		}
+		started = nil
+		jaeger.stop()
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -174,6 +317,16 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 		stopStarted()
 		os.Exit(1)
 	}()
+
+	if tracing.enabled() {
+		if cmd == "start" && tracing.mode == jaegerModeBare {
+			fmt.Fprintln(os.Stderr, "warning: -jaeger-mode bare Jaeger stops when operate exits; use mercury or external with start")
+		}
+		if jaeger, err = startJaeger(tracing, base, cpu, idPrefix, jaegerLogPath(), track); err != nil {
+			stopStarted()
+			return err
+		}
+	}
 
 	for _, line := range lines {
 		addr, err := listenAddr(line, cfg)
@@ -186,6 +339,7 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 			return fmt.Errorf("%s: %w", line.id, err)
 		}
 		env := daemonEnv(line, coldCache)
+		addTraceEnv(line, env)
 		pid, err := start(base, line, cpu, env)
 		if err != nil {
 			stopStarted()
@@ -205,6 +359,12 @@ func run(mercury string, cpu, users int, file, configPath, cmd string, coldCache
 		}
 	}
 
+	if cmd == "autoscale" && readyFile != "" {
+		if err := waitGo(readyFile, goFile); err != nil {
+			stopStarted()
+			return err
+		}
+	}
 	if cmd == "start" {
 		fmt.Printf("left %d daemons running\n", len(started))
 		return nil
@@ -237,12 +397,12 @@ func parseFile(path string) ([]tuple, error) {
 		if len(fields) != 2 {
 			return nil, fmt.Errorf("%s:%d: want exec_path and hostname", path, n+1)
 		}
-		id := "hotel-" + filepath.Base(fields[0])
+		id := idPrefix + "-" + filepath.Base(fields[0])
 		if seen[id] {
 			return nil, fmt.Errorf("duplicate daemon id %s", id)
 		}
 		seen[id] = true
-		lines = append(lines, tuple{path: fields[0], hostname: fields[1], id: id})
+		lines = append(lines, tuple{path: resolveExec(fields[0]), hostname: fields[1], id: id})
 	}
 	if len(lines) == 0 {
 		return nil, fmt.Errorf("%s has no programs", path)
@@ -295,8 +455,11 @@ func ping(base string) error {
 // while the runtime starts, before it samples the one-core cpuset. Memcached
 // and mongod do not, so their wrappers turn these variables into -t and
 // WiredTiger's concurrent-transaction caps.
+// threadCapCores caps service threads (memcached -t, WiredTiger, GOMAXPROCS) independently of -svc-max (gnn-slo-v1 sweep).
+const threadCapCores = 16
+
 func daemonEnv(line tuple, coldCache bool) map[string]string {
-	limit := strconv.Itoa(autoMaxCores)
+	limit := strconv.Itoa(threadCapCores) // not -svc-max: fixed-allocation sweeps keep the same thread counts
 	switch {
 	case strings.Contains(line.path, "/memcached/"):
 		return map[string]string{"MEMCACHED_THREADS": limit}
@@ -433,4 +596,24 @@ func dropHotelDatabases(mongoAddr string) error {
 		}
 	}
 	return nil
+}
+
+var readyFile, goFile string
+
+// waitGo writes ready and blocks until the go file exists (30 min at most), so a
+// caller can check ports and entry points with every daemon up but no load yet.
+func waitGo(ready, goPath string) error {
+	if goPath == "" {
+		goPath = ready + ".go"
+	}
+	if err := os.WriteFile(ready, []byte(fmt.Sprintf("%s ready %d\n", idPrefix, time.Now().UnixMilli())), 0644); err != nil {
+		return err
+	}
+	fmt.Printf("%s: daemons up, waiting for %s\n", idPrefix, goPath)
+	for deadline := time.Now().Add(30 * time.Minute); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		if _, err := os.Stat(goPath); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s never appeared", goPath)
 }

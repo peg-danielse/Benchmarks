@@ -18,14 +18,18 @@ import (
 // Environment read by bin/loadgen. Mercury execs a daemon with no arguments,
 // so everything the generator needs arrives here.
 const (
-	envRole   = "OPERATE_ROLE"  // "loadgen" selects runLoadgen in main
-	envUsers  = "LOADGEN_USERS" // maximum users per route
-	envOut    = "LOADGEN_OUT"   // output file, one fsynced line per write
-	envID     = "LOADGEN_ID"    // this daemon's Mercury id, for its own cgroup
-	envConfig = "HOTEL_CONFIG"  // config.json path
-	envConns  = "LOADGEN_CONNS" // gRPC connections per route (0 = one per worker)
-	envFile   = "LOADGEN_FILE"  // deployment list, for the cpus column
-	envMax    = "LOADGEN_MAX"   // saturate max, for gen_bound
+	envRole   = "OPERATE_ROLE"      // "loadgen" selects runLoadgen in main
+	envUsers  = "LOADGEN_USERS"     // maximum users per route
+	envOut    = "LOADGEN_OUT"       // output file, one fsynced line per write
+	envID     = "LOADGEN_ID"        // this daemon's Mercury id, for its own cgroup
+	envConfig = "HOTEL_CONFIG"      // config.json path
+	envConns  = "LOADGEN_CONNS"     // gRPC connections per route (0 = one per worker)
+	envWindow = "LOADGEN_WINDOW_MS" // measurement window per autoscale reading
+	envFile   = "LOADGEN_FILE"      // deployment list, for the cpus column
+	envMax    = "LOADGEN_MAX"       // saturate max, for gen_bound
+	envRoutes = "LOADGEN_ROUTES"    // routes to drive (-routes), comma list; empty = all
+	envHist   = "LOADGEN_HIST"      // per-window latency histogram file (-hist); empty = off
+	envEntry  = "LOADGEN_ENTRY"     // frontend or services (-entry)
 	roleGen   = "loadgen"
 	doneLine  = "loadgen done"
 	errorLine = "loadgen error"
@@ -68,6 +72,13 @@ func loadgenMain(w io.Writer) error {
 	if err != nil || users < 1 {
 		return fmt.Errorf("%s must be a positive integer, got %q", envUsers, os.Getenv(envUsers))
 	}
+	if v := os.Getenv(envWindow); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 100 {
+			return fmt.Errorf("bad %s %q", envWindow, v)
+		}
+		windowMs = n
+	}
 	if v := os.Getenv(envConns); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
@@ -93,13 +104,34 @@ func loadgenMain(w io.Writer) error {
 	if file == "" {
 		file = root + "/mercury-hotel.txt"
 	}
+	id := os.Getenv(envID)
+	if id == "" {
+		id = loadgenID
+	}
+	idPrefix = strings.TrimSuffix(id, "-loadgen") // the operator's -prefix: daemon ids (cgroups) of this instance
 	lines, err := parseFile(file)
 	if err != nil {
 		return err
 	}
-	id := os.Getenv(envID)
-	if id == "" {
-		id = loadgenID
+	if v := os.Getenv(envEntry); v != "" {
+		loadEntry = v
+	}
+	if loadRoutes, err = parseRoutes(os.Getenv(envRoutes)); err != nil {
+		return err
+	}
+	if p := os.Getenv(envHist); p != "" {
+		hf, err := os.OpenFile(p, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		defer hf.Close()
+		histOut = hf
+	}
+	traceMarks = os.Getenv(envTraceMarks) == "1"
+	if v := os.Getenv(envLoad); v != "" {
+		if err := demoLoad.decode(v); err != nil {
+			return err
+		}
 	}
 	gen := &genMeter{
 		cpus: func() string { return readCPUSet(id) },
@@ -182,7 +214,7 @@ func countCPUs(spec string) int {
 
 // cgroupBusy is usage_usec from the daemon's cgroup cpu.stat.
 func cgroupBusy(id string) (time.Duration, bool) {
-	data, err := os.ReadFile("/sys/fs/cgroup/mercury/" + id + "/cpu.stat")
+	data, err := os.ReadFile(cgroupFile(id, "cpu.stat"))
 	if err != nil {
 		return 0, false
 	}
@@ -218,14 +250,13 @@ func selfBusy() (time.Duration, bool) {
 
 // runMercuryLoadgen starts bin/loadgen under Mercury, gives it a home CPU and
 // the saturate policy, and copies its output to stdout until it finishes.
-func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts, track func(tuple)) error {
+func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts, track func(tuple), w io.Writer) error {
 	if st, err := os.Stat(opts.bin); err != nil || st.Mode()&0o111 == 0 {
 		return fmt.Errorf("loadgen binary %s is missing or not executable (go build -o bin/loadgen ./operate)", opts.bin)
 	}
 	out := opts.out
 	if out == "" {
-		out = filepath.Join(root, "deathstar-hotelReservations", "output",
-			fmt.Sprintf("loadgen-%d.out", time.Now().Unix()))
+		out = defaultGenOut()
 	}
 	env := map[string]string{
 		envRole:      roleGen,
@@ -234,9 +265,23 @@ func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts
 		envID:        loadgenID,
 		envConfig:    opts.config,
 		envConns:     strconv.Itoa(opts.conns),
+		envWindow:    strconv.Itoa(windowMs),
 		envMax:       strconv.Itoa(opts.genMax),
+		envRoutes:    strings.Join(loadRoutes, ","),
+		envEntry:     loadEntry,
+		envHist:      histPath,
 		"GOMAXPROCS": strconv.Itoa(opts.genProcs),
 	}
+	if tracing.enabled() {
+		env[envTraceMarks] = "1"
+	}
+	if demoLoad.needsEnv() {
+		env[envLoad] = demoLoad.encode()
+	}
+	if v := os.Getenv(envCgroupRoot); v != "" {
+		env[envCgroupRoot] = v
+	}
+	env["DSB_ROOT"] = root // Mercury passes only explicit env: the loadgen needs the same root
 	gen := tuple{path: opts.bin, hostname: "localhost", id: loadgenID}
 	pid, err := start(base, gen, opts.homeCPU, env)
 	if err != nil {
@@ -251,7 +296,15 @@ func runMercuryLoadgen(base string, lines []tuple, maxUsers int, opts clientOpts
 		return err
 	}
 	fmt.Printf("policy loadgen saturate min %d max %d home %d out %s\n", opts.genMin, opts.genMax, opts.homeCPU, out)
-	return tailLoadgen(out, func() bool { return processAlive(pid) }, os.Stdout, 100*time.Millisecond)
+	return tailLoadgen(out, func() bool { return processAlive(pid) }, w, 100*time.Millisecond)
+}
+
+// histPath is the -hist file (<gen-out without .out>.hist.jsonl), empty when -hist is off.
+var histPath string
+
+func defaultGenOut() string {
+	return filepath.Join(root, "deathstar-hotelReservations", "output",
+		fmt.Sprintf("loadgen-%d.out", time.Now().Unix()))
 }
 
 func processAlive(pid int) bool {

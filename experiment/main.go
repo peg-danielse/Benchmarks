@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -21,11 +22,48 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-const (
-	root = "/home/paul/Benchmarks"
+func benchmarksRoot() string {
+	if r := os.Getenv("DSB_ROOT"); r != "" {
+		return r
+	}
+	if exe, err := os.Executable(); err == nil {
+		if exe, err = filepath.EvalSymlinks(exe); err == nil {
+			if r := findBenchmarks(filepath.Dir(exe)); r != "" {
+				return r
+			}
+		}
+	}
+	if _, file, _, ok := goruntime.Caller(0); ok {
+		if r := findBenchmarks(filepath.Dir(file)); r != "" {
+			return r
+		}
+	}
+	fmt.Fprintln(os.Stderr, "cannot find the benchmarks directory; set DSB_ROOT")
+	os.Exit(1)
+	return ""
+}
 
-	configPath = root + "/deathstar-hotelReservations/config.json"
-)
+func findBenchmarks(start string) string {
+	dir := start
+	for {
+		hotel := filepath.Join(dir, "deathstar-hotelReservations")
+		runtimeDir := filepath.Join(dir, "runtime")
+		if info, err := os.Stat(hotel); err == nil && info.IsDir() {
+			if info, err = os.Stat(runtimeDir); err == nil && info.IsDir() {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func configPath() string {
+	return benchmarksRoot() + "/deathstar-hotelReservations/config.json"
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -51,11 +89,11 @@ func run() error {
 	}
 	defer os.RemoveAll(work)
 
-	hotel, err = boot.LoadFile(configPath)
+	hotel, err = boot.LoadFile(configPath())
 	if err != nil {
 		return err
 	}
-	config, err := os.ReadFile(configPath)
+	config, err := os.ReadFile(configPath())
 	if err != nil {
 		return err
 	}
@@ -93,11 +131,11 @@ func run() error {
 	}()
 
 	runtime := []struct{ name, path string }{
-		{"memcached-11211", root + "/runtime/memcached/11211"},
-		{"memcached-11212", root + "/runtime/memcached/11212"},
-		{"memcached-11213", root + "/runtime/memcached/11213"},
-		{"memcached-11214", root + "/runtime/memcached/11214"},
-		{"mongod", root + "/runtime/mongodb/mongod"},
+		{"memcached-11211", benchmarksRoot() + "/runtime/memcached/11211"},
+		{"memcached-11212", benchmarksRoot() + "/runtime/memcached/11212"},
+		{"memcached-11213", benchmarksRoot() + "/runtime/memcached/11213"},
+		{"memcached-11214", benchmarksRoot() + "/runtime/memcached/11214"},
+		{"mongod", benchmarksRoot() + "/runtime/mongodb/mongod"},
 	}
 	for _, spec := range runtime {
 		ch, err := startChild(spec.name, spec.path, work)
@@ -119,7 +157,7 @@ func run() error {
 		return err
 	}
 
-	bin := root + "/deathstar-hotelReservations/bin"
+	bin := benchmarksRoot() + "/deathstar-hotelReservations/bin"
 	apps := []string{
 		"geo", "profile", "rate", "recommendation", "user",
 		"reservation", "review", "attractions", "search", "frontend",

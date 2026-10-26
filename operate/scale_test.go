@@ -1,7 +1,16 @@
 package main
 
 import (
+	"context"
+	"encoding/hex"
+	"fmt"
+	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/boot"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -66,5 +75,96 @@ func TestReadWindow(t *testing.T) {
 	// 4000us sits in a bucket at most 12.5% wide.
 	if got.p95Us < 4000 || got.p95Us > 4000*1.125 {
 		t.Fatalf("p95_us %v", got.p95Us)
+	}
+}
+
+func TestParseRoutes(t *testing.T) {
+	defer func(e string) { loadEntry = e }(loadEntry)
+	loadEntry = entryServices
+	all, err := parseRoutes("")
+	if err != nil || len(all) != len(hotelServiceNames) {
+		t.Fatalf("empty list: %v %v", all, err)
+	}
+	got, err := parseRoutes("search, geo")
+	if err != nil || strings.Join(got, ",") != "geo,search" {
+		t.Fatalf("search,geo: %v %v", got, err)
+	}
+	if _, err := parseRoutes("geo,nope"); err == nil {
+		t.Fatal("unknown route accepted")
+	}
+}
+
+func TestParseRoutesFrontend(t *testing.T) {
+	defer func(e string) { loadEntry = e }(loadEntry)
+	loadEntry = entryFrontend
+	all, err := parseRoutes("")
+	if err != nil || len(all) != len(frontendRoutes) {
+		t.Fatalf("frontend default: %v %v", all, err)
+	}
+	if _, err := parseRoutes("geo"); err == nil {
+		t.Fatal("a service route was accepted with -entry frontend")
+	}
+	got, err := parseRoutes("reservation,hotels")
+	if err != nil || strings.Join(got, ",") != "hotels,reservation" {
+		t.Fatalf("hotels,reservation: %v %v", got, err)
+	}
+}
+
+// TestFrontendRoute calls every frontend route against a fake frontend: valid parameters reach it, and a 200 with
+// a failed login counts as an error.
+func TestFrontendRoute(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]url.Values{}
+	fail := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path] = r.URL.Query()
+		f := fail
+		mu.Unlock()
+		if f {
+			fmt.Fprint(w, `"Failed. Please check your username and password. "`)
+			return
+		}
+		fmt.Fprint(w, `{"message":"Logged-in successfully!"}`)
+	}))
+	defer srv.Close()
+	cfg := boot.Config{Services: map[string]string{"frontend": strings.TrimPrefix(srv.URL, "http://")}}
+	need := map[string][]string{
+		"hotels": {"inDate", "outDate", "lat", "lon"}, "recommendations": {"require", "lat", "lon"},
+		"user": {"username", "password"}, "review": {"username", "password", "hotelId"},
+		"restaurants": {"hotelId"}, "museums": {"hotelId"}, "cinema": {"hotelId"},
+		"reservation": {"inDate", "outDate", "hotelId", "customerName", "username", "password", "number"},
+	}
+	for _, route := range frontendRoutes {
+		l, err := openFrontendRoute(cfg, route, 4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.call(context.Background(), 0); err != nil {
+			t.Fatalf("%s: %v", route, err)
+		}
+		q := seen["/"+route]
+		for _, k := range need[route] {
+			if q.Get(k) == "" {
+				t.Fatalf("%s: missing %s in %v", route, k, q)
+			}
+		}
+		if u := q.Get("username"); u != "" {
+			id, _ := hex.DecodeString(strings.TrimPrefix(u, "Cornell_"))
+			if q.Get("password") != strings.Repeat(string(id), 10) {
+				t.Fatalf("%s: password %q does not match user %q", route, q.Get("password"), u)
+			}
+		}
+		l.close()
+	}
+	mu.Lock()
+	fail = true
+	mu.Unlock()
+	l, _ := openFrontendRoute(cfg, "user", 4)
+	if err := l.call(context.Background(), 0); err == nil {
+		t.Fatal("a failed login counted as served")
+	}
+	if _, err := openFrontendRoute(cfg, "geo", 4); err == nil {
+		t.Fatal("unknown frontend route accepted")
 	}
 }

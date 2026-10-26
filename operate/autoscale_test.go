@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -179,5 +181,30 @@ func TestIdleWorkersStayParked(t *testing.T) {
 	case <-finished:
 	case <-time.After(2 * time.Second):
 		t.Fatal("parked workers did not stop")
+	}
+}
+
+func TestWriteHist(t *testing.T) {
+	var buf bytes.Buffer
+	histOut = &buf
+	defer func() { histOut = nil }()
+	var d snap
+	d.sent, d.done = 4, 3
+	d.hist[bucketOf(2_000_000)] = 3
+	writeHist([]liveRoute{{name: "geo"}}, []snap{d}, 2, 1, 8, 100, 200)
+	var row struct {
+		Route   string     `json:"route"`
+		Clients int        `json:"clients"`
+		T0      int64      `json:"t0_ns"`
+		T1      int64      `json:"t1_ns"`
+		Done    int        `json:"done"`
+		Hist    [][2]int64 `json:"hist"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &row); err != nil {
+		t.Fatalf("%v: %s", err, buf.String())
+	}
+	if row.Route != "geo" || row.Clients != 8 || row.Done != 3 || row.T0 != 100 || row.T1 != 200 || len(row.Hist) != 1 || row.Hist[0][1] != 3 ||
+		row.Hist[0][0] < 2_000_000 || row.Hist[0][0] > 2_300_000 {
+		t.Fatalf("row %+v from %s", row, buf.String())
 	}
 }

@@ -14,11 +14,17 @@ import (
 	"time"
 
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/boot"
+	"golang.org/x/sys/unix"
+)
+
+// -svc-min / -svc-max: service scale bounds (-svc-min N -svc-max N = fixed N cores).
+var (
+	autoMaxCores = 16
+	svcMinCores  = 1
 )
 
 const (
-	autoMaxCores = 16
-	autoWindows  = 4
+	autoWindows = 4
 
 	// Linux CPU 0 is Mercury. Homes begin at CPU 1, one per line of
 	// mercury-hotel.txt. The loader keeps clientFirstCPU through clientLastCPU.
@@ -68,7 +74,6 @@ type clientOpts struct {
 const (
 	clientMercury = "mercury"
 	clientInproc  = "inproc"
-	loadgenID     = "hotel-loadgen"
 
 	defaultGenCPU   = 60
 	defaultGenMin   = 2
@@ -77,6 +82,7 @@ const (
 )
 
 func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int, opts clientOpts, track func(tuple)) error {
+	maxUsers = demoLoad.workers(maxUsers)
 	homes, err := daemonHomes(len(lines))
 	if err != nil {
 		return err
@@ -98,24 +104,37 @@ func autoscaleServices(base string, cfg boot.Config, lines []tuple, maxUsers int
 		if err := setCpus(base, line.id, spec); err != nil {
 			return err
 		}
-		if err := enableSaturate(base, line.id, 1, autoMaxCores); err != nil {
+		mn, mx := svcRange(line, svcMinCores, autoMaxCores)
+		if err := enableScale(base, line.id, servicePolicy, mn, mx); err != nil {
 			return err
 		}
 		fmt.Printf(" %s=%s", filepath.Base(line.path), spec)
 	}
 	fmt.Println()
-	fmt.Printf("policy saturate min 1 max %d users 1-%d\n", autoMaxCores, maxUsers)
+	fmt.Printf("policy %s placement %s tick_ms %d min %d max %d users 1-%d\n", servicePolicy, servicePlacement, serviceTickMs, svcMinCores, autoMaxCores, maxUsers)
 
 	for _, name := range hotelServiceNames {
 		if _, ok := findLine(lines, name); !ok {
 			return fmt.Errorf("deployment has no %s", name)
 		}
 	}
-	if opts.mode == clientInproc {
-		gen := &genMeter{cpus: inprocCPUs, busy: selfBusy, max: len(clientCPUs())}
-		return driveRoutes(cfg, maxUsers, os.Stdout, lines, gen)
+	fmt.Println(demoLoad.describe())
+	closeWindows, err := startWindowLog(opts.out, hotelOutputDir())
+	if err != nil {
+		return err
 	}
-	return runMercuryLoadgen(base, lines, maxUsers, opts, track)
+	defer closeWindows()
+	w, finishTraces, err := beginTraceAnalysis()
+	if err != nil {
+		return err
+	}
+	defer finishTraces()
+	if opts.mode == clientInproc {
+		traceMarks = tracing.enabled()
+		gen := &genMeter{cpus: inprocCPUs, busy: selfBusy, max: len(clientCPUs())}
+		return driveRoutes(cfg, maxUsers, w, lines, gen)
+	}
+	return runMercuryLoadgen(base, lines, maxUsers, opts, track, w)
 }
 
 // driveRoutes ramps every hotel route together and prints one line per route
@@ -128,20 +147,31 @@ func driveRoutes(cfg boot.Config, maxUsers int, w io.Writer, lines []tuple, gen 
 		return err
 	}
 
-	for _, clients := range rampClients(maxUsers) {
-		for _, route := range routes {
-			route.rec.setActive(int32(clients))
+	var marks markCounter
+	next := demoLoad.levels(maxUsers, windowMs, time.Now) // -load ramp or sine (demoload.go)
+	for {
+		lv, ok := next()
+		if !ok {
+			break
 		}
-		for window := 0; window < autoWindows; window++ {
+		level, clients := lv.level, lv.clients
+		for _, route := range routes {
+			route.rec.setLevel(clients)
+		}
+		for window := 0; window < lv.windows; window++ {
 			g0 := gen.begin()
-			readings := measureRoutes(routes)
+			t0 := time.Now()
+			readings, diffs, m0, m1 := measureRoutes(routes)
+			t1 := time.Now()
 			gw := gen.end(g0)
 			cpus := cpuSetList(lines, readCPUSet)
+			marks.emit(w, level, window, clients, t0, t1) // -jaeger only: window marker for the trace analyser
+			writeHist(routes, diffs, level, window, clients, m0, m1)
 			for i, route := range routes {
 				reading := readings[i]
-				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f errors %d cpus %s %s\n",
-					route.name, clients, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.errors,
-					cpus, gw)
+				fmt.Fprintf(w, "route %s clients %d arrival_rate %d service_rate %d avg_us %.1f p95_us %.1f p99_us %.1f errors %d cpus %s %s%s\n",
+					route.name, clients, reading.arrivalRate, reading.serviceRate, reading.avgUs, reading.p95Us, reading.p99Us, reading.errors,
+					cpus, gw, lv.suffix())
 			}
 		}
 	}
@@ -156,14 +186,20 @@ type liveRoute struct {
 }
 
 func openRoutes(cfg boot.Config, maxUsers int) ([]liveRoute, error) {
-	routes := make([]liveRoute, 0, len(hotelServiceNames))
-	for _, name := range hotelServiceNames {
+	routes := make([]liveRoute, 0, len(loadRoutes))
+	for _, name := range loadRoutes {
 		work, err := openLoad(cfg, name, maxUsers)
 		if err != nil {
 			return routes, err
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		rec := startLoad(ctx, work.call, maxUsers, 1)
+		var rec *recorder
+		if demoLoad.poisson() {
+			rec = startPoisson(ctx, work.call, demoLoad.inflight, demoLoad.timeout(), routeSeed(name))
+			rec.setLevel(readyRate) // until the schedule starts
+		} else {
+			rec = startLoad(ctx, work.call, maxUsers, 1)
+		}
 		routes = append(routes, liveRoute{name: name, work: work, rec: rec, cancel: cancel})
 		if err := waitReady(rec, name); err != nil {
 			return routes, err
@@ -188,24 +224,75 @@ func stopRoutes(routes []liveRoute) {
 	}
 }
 
-func measureRoutes(routes []liveRoute) []reading {
+// windowMs is the autoscale measurement window (-window-ms, LOADGEN_WINDOW_MS); default 1 s.
+var windowMs = 1000
+
+// measureRoutes returns one reading per route for a window, the per-route counter deltas of that
+// window (for -hist), and the window's CLOCK_MONOTONIC bounds (the clock of threadtrace).
+func measureRoutes(routes []liveRoute) ([]reading, []snap, int64, int64) {
 	befores := make([]snap, len(routes))
 	for i, route := range routes {
 		befores[i] = route.rec.snapshot()
 	}
+	m0 := monoNs()
 	began := time.Now()
-	time.Sleep(scaleMeasure)
+	time.Sleep(time.Duration(windowMs) * time.Millisecond)
 	elapsed := time.Since(began)
+	m1 := monoNs()
 	out := make([]reading, len(routes))
+	diffs := make([]snap, len(routes))
 	for i, route := range routes {
-		out[i] = readWindow(befores[i], route.rec.snapshot(), elapsed)
+		after := route.rec.snapshot()
+		out[i] = readWindow(befores[i], after, elapsed)
+		diffs[i] = after.sub(befores[i])
 	}
-	return out
+	return out, diffs, m0, m1
+}
+
+// histOut receives one JSON line per route per window when -hist is on (LOADGEN_HIST in bin/loadgen):
+// the window's monotonic bounds, counts, and every non-empty latency bucket as [upper_ns, count],
+// so a deadline miss rate can be computed afterwards for any deadline.
+var histOut io.Writer
+
+func writeHist(routes []liveRoute, diffs []snap, level, window, clients int, m0, m1 int64) {
+	if histOut == nil {
+		return
+	}
+	for i, route := range routes {
+		d := diffs[i]
+		var b strings.Builder
+		fmt.Fprintf(&b, `{"route":%q,"level":%d,"window":%d,"clients":%d,"t0_ns":%d,"t1_ns":%d,"sent":%d,"done":%d,"errors":%d,"hist":[`,
+			route.name, level, window, clients, m0, m1, d.sent, d.done, d.errs)
+		first := true
+		for k, c := range d.hist {
+			if c == 0 {
+				continue
+			}
+			if !first {
+				b.WriteByte(',')
+			}
+			first = false
+			fmt.Fprintf(&b, "[%d,%d]", bucketUpper(k), c)
+		}
+		b.WriteString("]}\n")
+		io.WriteString(histOut, b.String())
+	}
+}
+
+func monoNs() int64 {
+	var ts unix.Timespec
+	if unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts) != nil {
+		return 0
+	}
+	return ts.Nano()
 }
 
 func daemonHomes(n int) ([]int, error) {
 	if n < 1 {
 		return nil, fmt.Errorf("no daemons")
+	}
+	if demoLoad.homes != "" {
+		return listHomes(demoLoad.homes, n) // -homes: demo splits the pool between apps
 	}
 	homes := make([]int, n)
 	for i := range homes {
@@ -236,12 +323,32 @@ func rampClients(maxUsers int) []int {
 }
 
 func enableSaturate(base, id string, minCores, maxCores int) error {
-	status, body, err := post(base, "/scale", map[string]any{
+	return enableScale(base, id, "saturate", minCores, maxCores)
+}
+
+// Policy for the service daemons (-policy, -tick-ms, -placement). The load generator stays on saturate.
+var (
+	servicePolicy    = "saturate"
+	serviceTickMs    = 10
+	servicePlacement = "least_loaded"
+	servicePin       = true // -pin: gnn pins busy threads (false: cpuset sizing only)
+)
+
+// enableScale attaches policy (saturate or gnn) to a daemon with the -placement core hand-out.
+// tick_ms is sent for gnn only.
+func enableScale(base, id, policy string, minCores, maxCores int) error {
+	req := map[string]any{
 		"daemon_id": id,
-		"policy":    "saturate",
+		"policy":    policy,
 		"min":       minCores,
 		"max":       maxCores,
-	})
+		"placement": servicePlacement,
+	}
+	if policy == "gnn" {
+		req["tick_ms"] = serviceTickMs
+		req["pin"] = servicePin
+	}
+	status, body, err := post(base, "/scale", req)
 	if err != nil {
 		return err
 	}
@@ -252,7 +359,7 @@ func enableSaturate(base, id string, minCores, maxCores int) error {
 }
 
 func readCPUSet(id string) string {
-	data, err := os.ReadFile("/sys/fs/cgroup/mercury/" + id + "/cpuset.cpus")
+	data, err := os.ReadFile(cgroupFile(id, "cpuset.cpus"))
 	if err != nil {
 		return "?"
 	}
@@ -274,4 +381,49 @@ func cpuSetList(lines []tuple, spec func(string) string) string {
 		b.WriteString(spec(line.id))
 	}
 	return b.String()
+}
+
+// svcFixed (-svc-fixed "geo=1,mongod=2"): per-program fixed allocation (/scale min = max), keyed by the
+// deployment line's program name (memcached port, mongod, service name). Others use -svc-min/-svc-max.
+var svcFixed = map[string]int{}
+
+func parseSvcFixed(s string) error {
+	for _, kv := range strings.Split(s, ",") {
+		if kv == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		n, err := strconv.Atoi(v)
+		if !ok || err != nil || n < 1 {
+			return fmt.Errorf("-svc-fixed: bad entry %q (want name=cores)", kv)
+		}
+		svcFixed[k] = n
+	}
+	return nil
+}
+
+func svcRange(line tuple, mn, mx int) (int, int) {
+	if k, ok := svcFixed[filepath.Base(line.path)]; ok {
+		return k, k
+	}
+	return mn, mx
+}
+
+// idPrefix names this instance's Mercury daemons (<prefix>-geo, <prefix>-loadgen,
+// <prefix>-jaeger); -prefix sets it so two hotels can share one Mercury.
+var (
+	idPrefix  = "hotel"
+	loadgenID = "hotel-loadgen"
+)
+
+// readyRate (req/s) probes a route under -arrivals poisson until the schedule sets its first level.
+const readyRate = 20
+
+// routeSeed gives each route its own reproducible Poisson arrival sequence.
+func routeSeed(name string) int64 {
+	h := int64(1469598103934665603)
+	for _, c := range name {
+		h = (h ^ int64(c)) * 1099511628211
+	}
+	return h
 }
